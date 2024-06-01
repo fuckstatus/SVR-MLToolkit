@@ -236,4 +236,175 @@ Precomputed Kernels
 ===================
 
 Users may precompute kernel values and input them as training and
-testing files.  Then lib
+testing files.  Then libsvm does not need the original
+training/testing sets.
+
+Assume there are L training instances x1, ..., xL and. 
+Let K(x, y) be the kernel
+value of two instances x and y. The input formats
+are:
+
+New training instance for xi:
+
+<label> 0:i 1:K(xi,x1) ... L:K(xi,xL) 
+
+New testing instance for any x:
+
+<label> 0:? 1:K(x,x1) ... L:K(x,xL) 
+
+That is, in the training file the first column must be the "ID" of
+xi. In testing, ? can be any value.
+
+All kernel values including ZEROs must be explicitly provided.  Any
+permutation or random subsets of the training/testing files are also
+valid (see examples below).
+
+Note: the format is slightly different from the precomputed kernel
+package released in libsvmtools earlier.
+
+Examples:
+
+	Assume the original training data has three four-feature
+	instances and testing data has one instance:
+
+	15  1:1 2:1 3:1 4:1
+	45      2:3     4:3
+	25          3:1
+
+	15  1:1     3:1
+
+	If the linear kernel is used, we have the following new
+	training/testing sets:
+
+	15  0:1 1:4 2:6  3:1
+	45  0:2 1:6 2:18 3:0 
+	25  0:3 1:1 2:0  3:1
+ 
+	15  0:? 1:2 2:0  3:1
+
+	? can be any value.
+
+	Any subset of the above training file is also valid. For example,
+
+	25  0:3 1:1 2:0  3:1
+	45  0:2 1:6 2:18 3:0 
+
+	implies that the kernel matrix is
+
+		[K(2,2) K(2,3)] = [18 0]
+		[K(3,2) K(3,3)] = [0  1]
+
+Library Usage
+=============
+
+These functions and structures are declared in the header file
+`svm.h'.  You need to #include "svm.h" in your C/C++ source files and
+link your program with `svm.cpp'. You can see `svm-train.c' and
+`svm-predict.c' for examples showing how to use them. We define
+LIBSVM_VERSION and declare `extern int libsvm_version; ' in svm.h, so
+you can check the version number.
+
+Before you classify test data, you need to construct an SVM model
+(`svm_model') using training data. A model can also be saved in
+a file for later use. Once an SVM model is available, you can use it
+to classify new data.
+
+- Function: struct svm_model *svm_train(const struct svm_problem *prob,
+					const struct svm_parameter *param);
+
+    This function constructs and returns an SVM model according to
+    the given training data and parameters.
+
+    struct svm_problem describes the problem:
+	
+	struct svm_problem
+	{
+		int l;
+		double *y;
+		struct svm_node **x;
+	};
+ 
+    where `l' is the number of training data, and `y' is an array containing
+    their target values. (integers in classification, real numbers in
+    regression) `x' is an array of pointers, each of which points to a sparse
+    representation (array of svm_node) of one training vector. 
+
+    For example, if we have the following training data:
+
+    LABEL    ATTR1    ATTR2    ATTR3    ATTR4    ATTR5
+    -----    -----    -----    -----    -----    -----
+      1        0        0.1      0.2      0        0
+      2        0        0.1      0.3     -1.2      0
+      1        0.4      0        0        0        0
+      2        0        0.1      0        1.4      0.5
+      3       -0.1     -0.2      0.1      1.1      0.1
+
+    then the components of svm_problem are:
+
+    l = 5
+
+    y -> 1 2 1 2 3
+
+    x -> [ ] -> (2,0.1) (3,0.2) (-1,?)
+         [ ] -> (2,0.1) (3,0.3) (4,-1.2) (-1,?)
+         [ ] -> (1,0.4) (-1,?)
+         [ ] -> (2,0.1) (4,1.4) (5,0.5) (-1,?)
+         [ ] -> (1,-0.1) (2,-0.2) (3,0.1) (4,1.1) (5,0.1) (-1,?)
+
+    where (index,value) is stored in the structure `svm_node':
+
+	struct svm_node
+	{
+		int index;
+		double value;
+	};
+
+    index = -1 indicates the end of one vector. Note that indices must
+    be in ASCENDING order.
+ 
+    struct svm_parameter describes the parameters of an SVM model:
+
+	struct svm_parameter
+	{
+		int svm_type;
+		int kernel_type;
+		int degree;	/* for poly */
+		double gamma;	/* for poly/rbf/sigmoid */
+		double coef0;	/* for poly/sigmoid */
+
+		/* these are for training only */
+		double cache_size; /* in MB */
+		double eps;	/* stopping criteria */
+		double C;	/* for C_SVC, EPSILON_SVR, and NU_SVR */
+		int nr_weight;		/* for C_SVC */
+		int *weight_label;	/* for C_SVC */
+		double* weight;		/* for C_SVC */
+		double nu;	/* for NU_SVC, ONE_CLASS, and NU_SVR */
+		double p;	/* for EPSILON_SVR */
+		int shrinking;	/* use the shrinking heuristics */
+		int probability; /* do probability estimates */
+	};
+
+    svm_type can be one of C_SVC, NU_SVC, ONE_CLASS, EPSILON_SVR, NU_SVR.
+
+    C_SVC:		C-SVM classification
+    NU_SVC:		nu-SVM classification
+    ONE_CLASS:		one-class-SVM
+    EPSILON_SVR:	epsilon-SVM regression
+    NU_SVR:		nu-SVM regression
+
+    kernel_type can be one of LINEAR, POLY, RBF, SIGMOID.
+
+    LINEAR:	u'*v
+    POLY:	(gamma*u'*v + coef0)^degree
+    RBF:	exp(-gamma*|u-v|^2)
+    SIGMOID:	tanh(gamma*u'*v + coef0)
+    PRECOMPUTED: kernel values in training_set_file
+
+    cache_size is the size of the kernel cache, specified in megabytes.
+    C is the cost of constraints violation. 
+    eps is the stopping criterion. (we usually use 0.00001 in nu-SVC,
+    0.001 in others). nu is the parameter in nu-SVM, nu-SVR, and
+    one-class-SVM. p is the epsilon in epsilon-insensitive loss function
+    of epsilon-SVM regression. shrinking = 1 means shrinking is conducted;
+    = 0 
