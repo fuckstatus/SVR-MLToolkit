@@ -635,4 +635,135 @@ to classify new data.
 - Function: void svm_free_and_destroy_model(struct svm_model **model_ptr_ptr);
 
     This function frees the memory used by a model and destroys the model
-    structure. It is equivalent to svm_des
+    structure. It is equivalent to svm_destroy_model, which
+    is deprecated after version 3.0.
+
+- Function: void svm_destroy_param(struct svm_parameter *param);
+
+    This function frees the memory used by a parameter set.
+
+- Function: void svm_set_print_string_function(void (*print_func)(const char *));
+
+    Users can specify their output format by a function. Use
+        svm_set_print_string_function(NULL); 
+    for default printing to stdout.
+
+Java Version
+============
+
+The pre-compiled java class archive `libsvm.jar' and its source files are
+in the java directory. To run the programs, use
+
+java -classpath libsvm.jar svm_train <arguments>
+java -classpath libsvm.jar svm_predict <arguments>
+java -classpath libsvm.jar svm_toy
+java -classpath libsvm.jar svm_scale <arguments>
+
+Note that you need Java 1.5 (5.0) or above to run it.
+
+You may need to add Java runtime library (like classes.zip) to the classpath.
+You may need to increase maximum Java heap size.
+
+Library usages are similar to the C version. These functions are available:
+
+public class svm {
+	public static final int LIBSVM_VERSION=322; 
+	public static svm_model svm_train(svm_problem prob, svm_parameter param);
+	public static void svm_cross_validation(svm_problem prob, svm_parameter param, int nr_fold, double[] target);
+	public static int svm_get_svm_type(svm_model model);
+	public static int svm_get_nr_class(svm_model model);
+	public static void svm_get_labels(svm_model model, int[] label);
+	public static void svm_get_sv_indices(svm_model model, int[] indices);
+	public static int svm_get_nr_sv(svm_model model);
+	public static double svm_get_svr_probability(svm_model model);
+	public static double svm_predict_values(svm_model model, svm_node[] x, double[] dec_values);
+	public static double svm_predict(svm_model model, svm_node[] x);
+	public static double svm_predict_probability(svm_model model, svm_node[] x, double[] prob_estimates);
+	public static void svm_save_model(String model_file_name, svm_model model) throws IOException
+	public static svm_model svm_load_model(String model_file_name) throws IOException
+	public static String svm_check_parameter(svm_problem prob, svm_parameter param);
+	public static int svm_check_probability_model(svm_model model);
+	public static void svm_set_print_string_function(svm_print_interface print_func);
+}
+
+The library is in the "libsvm" package.
+Note that in Java version, svm_node[] is not ended with a node whose index = -1.
+
+Users can specify their output format by
+
+	your_print_func = new svm_print_interface()
+	{ 
+		public void print(String s)
+		{
+			// your own format
+		}
+	};
+	svm.svm_set_print_string_function(your_print_func);
+
+Building Windows Binaries
+=========================
+
+Windows binaries are available in the directory `windows'. To re-build
+them via Visual C++, use the following steps:
+
+1. Open a DOS command box (or Visual Studio Command Prompt) and change
+to libsvm directory. If environment variables of VC++ have not been
+set, type
+
+""C:\Program Files (x86)\Microsoft Visual Studio 12.0\VC\bin\amd64\vcvars64.bat""
+
+You may have to modify the above command according which version of
+VC++ or where it is installed.
+
+2. Type
+
+nmake -f Makefile.win clean all
+
+3. (optional) To build shared library libsvm.dll, type
+
+nmake -f Makefile.win lib
+
+4. (optional) To build 32-bit windows binaries, you must
+	(1) Setup "C:\Program Files (x86)\Microsoft Visual Studio 12.0\VC\bin\vcvars32.bat" instead of vcvars64.bat
+	(2) Change CFLAGS in Makefile.win: /D _WIN64 to /D _WIN32
+	
+Another way is to build them from Visual C++ environment. See details
+in libsvm FAQ.
+
+- Additional Tools: Sub-sampling, Parameter Selection, Format checking, etc.
+============================================================================
+
+See the README file in the tools directory.
+
+MATLAB/OCTAVE Interface
+=======================
+
+Please check the file README in the directory `matlab'.
+
+Python Interface
+================
+
+See the README file in python directory.
+
+Additional Information
+======================
+
+If you find LIBSVM helpful, please cite it as
+
+Chih-Chung Chang and Chih-Jen Lin, LIBSVM : a library for support
+vector machines. ACM Transactions on Intelligent Systems and
+Technology, 2:27:1--27:27, 2011. Software available at
+http://www.csie.ntu.edu.tw/~cjlin/libsvm
+
+LIBSVM implementation document is available at
+http://www.csie.ntu.edu.tw/~cjlin/papers/libsvm.pdf
+
+For any questions and comments, please email cjlin@csie.ntu.edu.tw
+
+Acknowledgments:
+This work was supported in part by the National Science 
+Council of Taiwan via the grant NSC 89-2213-E-002-013.
+The authors thank their group members and users
+for many helpful discussions and comments. They are listed in
+http://www.csie.ntu.edu.tw/~cjlin/libsvm/acknowledgements
+
