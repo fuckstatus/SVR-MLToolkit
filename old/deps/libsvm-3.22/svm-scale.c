@@ -249,4 +249,149 @@ int main(int argc,char **argv)
 			for(i=next_index;i<=max_index;i++)
 				if(feature_min[i] != feature_max[i])
 					fprintf(stderr,
-						"WARNING: feature index %d appeared in file %s was not seen in the scaling factor file %s.\n
+						"WARNING: feature index %d appeared in file %s was not seen in the scaling factor file %s.\n",
+						i, argv[argc-1], restore_filename);
+		}
+		fclose(fp_restore);
+	}
+
+	if(save_filename)
+	{
+		FILE *fp_save = fopen(save_filename,"w");
+		if(fp_save==NULL)
+		{
+			fprintf(stderr,"can't open file %s\n", save_filename);
+			exit(1);
+		}
+		if(y_scaling)
+		{
+			fprintf(fp_save, "y\n");
+			fprintf(fp_save, "%.16g %.16g\n", y_lower, y_upper);
+			fprintf(fp_save, "%.16g %.16g\n", y_min, y_max);
+		}
+		fprintf(fp_save, "x\n");
+		fprintf(fp_save, "%.16g %.16g\n", lower, upper);
+		for(i=1;i<=max_index;i++)
+		{
+			if(feature_min[i]!=feature_max[i])
+				fprintf(fp_save,"%d %.16g %.16g\n",i,feature_min[i],feature_max[i]);
+		}
+
+		if(min_index < 1)
+			fprintf(stderr,
+				"WARNING: scaling factors with indices smaller than 1 are not stored to the file %s.\n", save_filename);
+
+		fclose(fp_save);
+	}
+	
+	/* pass 3: scale */
+	while(readline(fp)!=NULL)
+	{
+		char *p=line;
+		int next_index=1;
+		double target;
+		double value;
+		
+		if (sscanf(p,"%lf",&target) != 1)
+			return clean_up(NULL, fp, "ERROR: failed to read labels\n");
+		output_target(target);
+
+		SKIP_TARGET
+
+		while(sscanf(p,"%d:%lf",&index,&value)==2)
+		{
+			for(i=next_index;i<index;i++)
+				output(i,0);
+			
+			output(index,value);
+
+			SKIP_ELEMENT
+			next_index=index+1;
+		}		
+
+		for(i=next_index;i<=max_index;i++)
+			output(i,0);
+
+		printf("\n");
+	}
+
+	if (new_num_nonzeros > num_nonzeros)
+		fprintf(stderr, 
+			"WARNING: original #nonzeros %ld\n"
+			"       > new      #nonzeros %ld\n"
+			"If feature values are non-negative and sparse, use -l 0 rather than the default -l -1\n",
+			num_nonzeros, new_num_nonzeros);
+
+	free(line);
+	free(feature_max);
+	free(feature_min);
+	fclose(fp);
+	return 0;
+}
+
+char* readline(FILE *input)
+{
+	int len;
+	
+	if(fgets(line,max_line_len,input) == NULL)
+		return NULL;
+
+	while(strrchr(line,'\n') == NULL)
+	{
+		max_line_len *= 2;
+		line = (char *) realloc(line, max_line_len);
+		len = (int) strlen(line);
+		if(fgets(line+len,max_line_len-len,input) == NULL)
+			break;
+	}
+	return line;
+}
+
+void output_target(double value)
+{
+	if(y_scaling)
+	{
+		if(value == y_min)
+			value = y_lower;
+		else if(value == y_max)
+			value = y_upper;
+		else value = y_lower + (y_upper-y_lower) *
+			     (value - y_min)/(y_max-y_min);
+	}
+	printf("%g ",value);
+}
+
+void output(int index, double value)
+{
+	/* skip single-valued attribute */
+	if(feature_max[index] == feature_min[index])
+		return;
+
+	if(value == feature_min[index])
+		value = lower;
+	else if(value == feature_max[index])
+		value = upper;
+	else
+		value = lower + (upper-lower) * 
+			(value-feature_min[index])/
+			(feature_max[index]-feature_min[index]);
+
+	if(value != 0)
+	{
+		printf("%d:%g ",index, value);
+		new_num_nonzeros++;
+	}
+}
+
+int clean_up(FILE *fp_restore, FILE *fp, const char* msg)
+{
+	fprintf(stderr,	"%s", msg);
+	free(line);
+	free(feature_max);
+	free(feature_min);
+	fclose(fp);
+	if (fp_restore)
+		fclose(fp_restore);
+	return -1;
+}
+
