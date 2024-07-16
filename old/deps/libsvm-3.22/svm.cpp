@@ -80,4 +80,262 @@ private:
 	long int size;
 	struct head_t
 	{
-		h
+		head_t *prev, *next;	// a circular list
+		Qfloat *data;
+		int len;		// data[0,len) is cached in this entry
+	};
+
+	head_t *head;
+	head_t lru_head;
+	void lru_delete(head_t *h);
+	void lru_insert(head_t *h);
+};
+
+Cache::Cache(int l_,long int size_):l(l_),size(size_)
+{
+	head = (head_t *)calloc(l,sizeof(head_t));	// initialized to 0
+	size /= sizeof(Qfloat);
+	size -= l * sizeof(head_t) / sizeof(Qfloat);
+	size = max(size, 2 * (long int) l);	// cache must be large enough for two columns
+	lru_head.next = lru_head.prev = &lru_head;
+}
+
+Cache::~Cache()
+{
+	for(head_t *h = lru_head.next; h != &lru_head; h=h->next)
+		free(h->data);
+	free(head);
+}
+
+void Cache::lru_delete(head_t *h)
+{
+	// delete from current location
+	h->prev->next = h->next;
+	h->next->prev = h->prev;
+}
+
+void Cache::lru_insert(head_t *h)
+{
+	// insert to last position
+	h->next = &lru_head;
+	h->prev = lru_head.prev;
+	h->prev->next = h;
+	h->next->prev = h;
+}
+
+int Cache::get_data(const int index, Qfloat **data, int len)
+{
+	head_t *h = &head[index];
+	if(h->len) lru_delete(h);
+	int more = len - h->len;
+
+	if(more > 0)
+	{
+		// free old space
+		while(size < more)
+		{
+			head_t *old = lru_head.next;
+			lru_delete(old);
+			free(old->data);
+			size += old->len;
+			old->data = 0;
+			old->len = 0;
+		}
+
+		// allocate new space
+		h->data = (Qfloat *)realloc(h->data,sizeof(Qfloat)*len);
+		size -= more;
+		swap(h->len,len);
+	}
+
+	lru_insert(h);
+	*data = h->data;
+	return len;
+}
+
+void Cache::swap_index(int i, int j)
+{
+	if(i==j) return;
+
+	if(head[i].len) lru_delete(&head[i]);
+	if(head[j].len) lru_delete(&head[j]);
+	swap(head[i].data,head[j].data);
+	swap(head[i].len,head[j].len);
+	if(head[i].len) lru_insert(&head[i]);
+	if(head[j].len) lru_insert(&head[j]);
+
+	if(i>j) swap(i,j);
+	for(head_t *h = lru_head.next; h!=&lru_head; h=h->next)
+	{
+		if(h->len > i)
+		{
+			if(h->len > j)
+				swap(h->data[i],h->data[j]);
+			else
+			{
+				// give up
+				lru_delete(h);
+				free(h->data);
+				size += h->len;
+				h->data = 0;
+				h->len = 0;
+			}
+		}
+	}
+}
+
+//
+// Kernel evaluation
+//
+// the static method k_function is for doing single kernel evaluation
+// the constructor of Kernel prepares to calculate the l*l kernel matrix
+// the member function get_Q is for getting one column from the Q Matrix
+//
+class QMatrix {
+public:
+	virtual Qfloat *get_Q(int column, int len) const = 0;
+	virtual double *get_QD() const = 0;
+	virtual void swap_index(int i, int j) const = 0;
+	virtual ~QMatrix() {}
+};
+
+class Kernel: public QMatrix {
+public:
+	Kernel(int l, svm_node * const * x, const svm_parameter& param);
+	virtual ~Kernel();
+
+	static double k_function(const svm_node *x, const svm_node *y,
+				 const svm_parameter& param);
+	virtual Qfloat *get_Q(int column, int len) const = 0;
+	virtual double *get_QD() const = 0;
+	virtual void swap_index(int i, int j) const	// no so const...
+	{
+		swap(x[i],x[j]);
+		if(x_square) swap(x_square[i],x_square[j]);
+	}
+protected:
+
+	double (Kernel::*kernel_function)(int i, int j) const;
+
+private:
+	const svm_node **x;
+	double *x_square;
+
+	// svm_parameter
+	const int kernel_type;
+	const int degree;
+	const double gamma;
+	const double coef0;
+
+	static double dot(const svm_node *px, const svm_node *py);
+	double kernel_linear(int i, int j) const
+	{
+		return dot(x[i],x[j]);
+	}
+	double kernel_poly(int i, int j) const
+	{
+		return powi(gamma*dot(x[i],x[j])+coef0,degree);
+	}
+	double kernel_rbf(int i, int j) const
+	{
+		return exp(-gamma*(x_square[i]+x_square[j]-2*dot(x[i],x[j])));
+	}
+	double kernel_sigmoid(int i, int j) const
+	{
+		return tanh(gamma*dot(x[i],x[j])+coef0);
+	}
+	double kernel_precomputed(int i, int j) const
+	{
+		return x[i][(int)(x[j][0].value)].value;
+	}
+};
+
+Kernel::Kernel(int l, svm_node * const * x_, const svm_parameter& param)
+:kernel_type(param.kernel_type), degree(param.degree),
+ gamma(param.gamma), coef0(param.coef0)
+{
+	switch(kernel_type)
+	{
+		case LINEAR:
+			kernel_function = &Kernel::kernel_linear;
+			break;
+		case POLY:
+			kernel_function = &Kernel::kernel_poly;
+			break;
+		case RBF:
+			kernel_function = &Kernel::kernel_rbf;
+			break;
+		case SIGMOID:
+			kernel_function = &Kernel::kernel_sigmoid;
+			break;
+		case PRECOMPUTED:
+			kernel_function = &Kernel::kernel_precomputed;
+			break;
+	}
+
+	clone(x,x_,l);
+
+	if(kernel_type == RBF)
+	{
+		x_square = new double[l];
+		for(int i=0;i<l;i++)
+			x_square[i] = dot(x[i],x[i]);
+	}
+	else
+		x_square = 0;
+}
+
+Kernel::~Kernel()
+{
+	delete[] x;
+	delete[] x_square;
+}
+
+double Kernel::dot(const svm_node *px, const svm_node *py)
+{
+	double sum = 0;
+	while(px->index != -1 && py->index != -1)
+	{
+		if(px->index == py->index)
+		{
+			sum += px->value * py->value;
+			++px;
+			++py;
+		}
+		else
+		{
+			if(px->index > py->index)
+				++py;
+			else
+				++px;
+		}
+	}
+	return sum;
+}
+
+double Kernel::k_function(const svm_node *x, const svm_node *y,
+			  const svm_parameter& param)
+{
+	switch(param.kernel_type)
+	{
+		case LINEAR:
+			return dot(x,y);
+		case POLY:
+			return powi(param.gamma*dot(x,y)+param.coef0,param.degree);
+		case RBF:
+		{
+			double sum = 0;
+			while(x->index != -1 && y->index !=-1)
+			{
+				if(x->index == y->index)
+				{
+					double d = x->value - y->value;
+					sum += d*d;
+					++x;
+					++y;
+				}
+				else
+				{
+					if(x->index > y->index)
+					{
+						sum += y->va
