@@ -338,4 +338,259 @@ double Kernel::k_function(const svm_node *x, const svm_node *y,
 				{
 					if(x->index > y->index)
 					{
-						sum += y->va
+						sum += y->value * y->value;
+						++y;
+					}
+					else
+					{
+						sum += x->value * x->value;
+						++x;
+					}
+				}
+			}
+
+			while(x->index != -1)
+			{
+				sum += x->value * x->value;
+				++x;
+			}
+
+			while(y->index != -1)
+			{
+				sum += y->value * y->value;
+				++y;
+			}
+
+			return exp(-param.gamma*sum);
+		}
+		case SIGMOID:
+			return tanh(param.gamma*dot(x,y)+param.coef0);
+		case PRECOMPUTED:  //x: test (validation), y: SV
+			return x[(int)(y->value)].value;
+		default:
+			return 0;  // Unreachable
+	}
+}
+
+// An SMO algorithm in Fan et al., JMLR 6(2005), p. 1889--1918
+// Solves:
+//
+//	min 0.5(\alpha^T Q \alpha) + p^T \alpha
+//
+//		y^T \alpha = \delta
+//		y_i = +1 or -1
+//		0 <= alpha_i <= Cp for y_i = 1
+//		0 <= alpha_i <= Cn for y_i = -1
+//
+// Given:
+//
+//	Q, p, y, Cp, Cn, and an initial feasible point \alpha
+//	l is the size of vectors and matrices
+//	eps is the stopping tolerance
+//
+// solution will be put in \alpha, objective value will be put in obj
+//
+class Solver {
+public:
+	Solver() {};
+	virtual ~Solver() {};
+
+	struct SolutionInfo {
+		double obj;
+		double rho;
+		double upper_bound_p;
+		double upper_bound_n;
+		double r;	// for Solver_NU
+	};
+
+	void Solve(int l, const QMatrix& Q, const double *p_, const schar *y_,
+		   double *alpha_, double Cp, double Cn, double eps,
+		   SolutionInfo* si, int shrinking);
+protected:
+	int active_size;
+	schar *y;
+	double *G;		// gradient of objective function
+	enum { LOWER_BOUND, UPPER_BOUND, FREE };
+	char *alpha_status;	// LOWER_BOUND, UPPER_BOUND, FREE
+	double *alpha;
+	const QMatrix *Q;
+	const double *QD;
+	double eps;
+	double Cp,Cn;
+	double *p;
+	int *active_set;
+	double *G_bar;		// gradient, if we treat free variables as 0
+	int l;
+	bool unshrink;	// XXX
+
+	double get_C(int i)
+	{
+		return (y[i] > 0)? Cp : Cn;
+	}
+	void update_alpha_status(int i)
+	{
+		if(alpha[i] >= get_C(i))
+			alpha_status[i] = UPPER_BOUND;
+		else if(alpha[i] <= 0)
+			alpha_status[i] = LOWER_BOUND;
+		else alpha_status[i] = FREE;
+	}
+	bool is_upper_bound(int i) { return alpha_status[i] == UPPER_BOUND; }
+	bool is_lower_bound(int i) { return alpha_status[i] == LOWER_BOUND; }
+	bool is_free(int i) { return alpha_status[i] == FREE; }
+	void swap_index(int i, int j);
+	void reconstruct_gradient();
+	virtual int select_working_set(int &i, int &j);
+	virtual double calculate_rho();
+	virtual void do_shrinking();
+private:
+	bool be_shrunk(int i, double Gmax1, double Gmax2);
+};
+
+void Solver::swap_index(int i, int j)
+{
+	Q->swap_index(i,j);
+	swap(y[i],y[j]);
+	swap(G[i],G[j]);
+	swap(alpha_status[i],alpha_status[j]);
+	swap(alpha[i],alpha[j]);
+	swap(p[i],p[j]);
+	swap(active_set[i],active_set[j]);
+	swap(G_bar[i],G_bar[j]);
+}
+
+void Solver::reconstruct_gradient()
+{
+	// reconstruct inactive elements of G from G_bar and free variables
+
+	if(active_size == l) return;
+
+	int i,j;
+	int nr_free = 0;
+
+	for(j=active_size;j<l;j++)
+		G[j] = G_bar[j] + p[j];
+
+	for(j=0;j<active_size;j++)
+		if(is_free(j))
+			nr_free++;
+
+	if(2*nr_free < active_size)
+		info("\nWARNING: using -h 0 may be faster\n");
+
+	if (nr_free*l > 2*active_size*(l-active_size))
+	{
+		for(i=active_size;i<l;i++)
+		{
+			const Qfloat *Q_i = Q->get_Q(i,active_size);
+			for(j=0;j<active_size;j++)
+				if(is_free(j))
+					G[i] += alpha[j] * Q_i[j];
+		}
+	}
+	else
+	{
+		for(i=0;i<active_size;i++)
+			if(is_free(i))
+			{
+				const Qfloat *Q_i = Q->get_Q(i,l);
+				double alpha_i = alpha[i];
+				for(j=active_size;j<l;j++)
+					G[j] += alpha_i * Q_i[j];
+			}
+	}
+}
+
+void Solver::Solve(int l, const QMatrix& Q, const double *p_, const schar *y_,
+		   double *alpha_, double Cp, double Cn, double eps,
+		   SolutionInfo* si, int shrinking)
+{
+	this->l = l;
+	this->Q = &Q;
+	QD=Q.get_QD();
+	clone(p, p_,l);
+	clone(y, y_,l);
+	clone(alpha,alpha_,l);
+	this->Cp = Cp;
+	this->Cn = Cn;
+	this->eps = eps;
+	unshrink = false;
+
+	// initialize alpha_status
+	{
+		alpha_status = new char[l];
+		for(int i=0;i<l;i++)
+			update_alpha_status(i);
+	}
+
+	// initialize active set (for shrinking)
+	{
+		active_set = new int[l];
+		for(int i=0;i<l;i++)
+			active_set[i] = i;
+		active_size = l;
+	}
+
+	// initialize gradient
+	{
+		G = new double[l];
+		G_bar = new double[l];
+		int i;
+		for(i=0;i<l;i++)
+		{
+			G[i] = p[i];
+			G_bar[i] = 0;
+		}
+		for(i=0;i<l;i++)
+			if(!is_lower_bound(i))
+			{
+				const Qfloat *Q_i = Q.get_Q(i,l);
+				double alpha_i = alpha[i];
+				int j;
+				for(j=0;j<l;j++)
+					G[j] += alpha_i*Q_i[j];
+				if(is_upper_bound(i))
+					for(j=0;j<l;j++)
+						G_bar[j] += get_C(i) * Q_i[j];
+			}
+	}
+
+	// optimization step
+
+	int iter = 0;
+	int max_iter = max(1000000000, l>INT_MAX/100 ? INT_MAX : 100*l);
+	int counter = min(l,1000)+1;
+
+	while(iter < max_iter)
+	{
+		// show progress and do shrinking
+
+		if(--counter == 0)
+		{
+			counter = min(l,1000);
+			if(shrinking) do_shrinking();
+			info(".");
+		}
+
+		int i,j;
+		if(select_working_set(i,j)!=0)
+		{
+			// reconstruct the whole gradient
+			reconstruct_gradient();
+			// reset active set size and check
+			active_size = l;
+			info("*");
+			if(select_working_set(i,j)!=0)
+				break;
+			else
+				counter = 1;	// do shrinking next iteration
+		}
+
+		++iter;
+
+		// update alpha[i] and alpha[j], handle bounds carefully
+
+		const Qfloat *Q_i = Q.get_Q(i,active_size);
+		const Qfloat *Q_j = Q.get_Q(j,active_size);
+
+		double
