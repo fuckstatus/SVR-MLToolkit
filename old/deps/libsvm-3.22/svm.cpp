@@ -891,4 +891,276 @@ bool Solver::be_shrunk(int i, double Gmax1, double Gmax2)
 		else
 			return(-G[i] > Gmax2);
 	}
-	else if(is_lower_bou
+	else if(is_lower_bound(i))
+	{
+		if(y[i]==+1)
+			return(G[i] > Gmax2);
+		else
+			return(G[i] > Gmax1);
+	}
+	else
+		return(false);
+}
+
+void Solver::do_shrinking()
+{
+	int i;
+	double Gmax1 = -INF;		// max { -y_i * grad(f)_i | i in I_up(\alpha) }
+	double Gmax2 = -INF;		// max { y_i * grad(f)_i | i in I_low(\alpha) }
+
+	// find maximal violating pair first
+	for(i=0;i<active_size;i++)
+	{
+		if(y[i]==+1)
+		{
+			if(!is_upper_bound(i))
+			{
+				if(-G[i] >= Gmax1)
+					Gmax1 = -G[i];
+			}
+			if(!is_lower_bound(i))
+			{
+				if(G[i] >= Gmax2)
+					Gmax2 = G[i];
+			}
+		}
+		else
+		{
+			if(!is_upper_bound(i))
+			{
+				if(-G[i] >= Gmax2)
+					Gmax2 = -G[i];
+			}
+			if(!is_lower_bound(i))
+			{
+				if(G[i] >= Gmax1)
+					Gmax1 = G[i];
+			}
+		}
+	}
+
+	if(unshrink == false && Gmax1 + Gmax2 <= eps*10)
+	{
+		unshrink = true;
+		reconstruct_gradient();
+		active_size = l;
+		info("*");
+	}
+
+	for(i=0;i<active_size;i++)
+		if (be_shrunk(i, Gmax1, Gmax2))
+		{
+			active_size--;
+			while (active_size > i)
+			{
+				if (!be_shrunk(active_size, Gmax1, Gmax2))
+				{
+					swap_index(i,active_size);
+					break;
+				}
+				active_size--;
+			}
+		}
+}
+
+double Solver::calculate_rho()
+{
+	double r;
+	int nr_free = 0;
+	double ub = INF, lb = -INF, sum_free = 0;
+	for(int i=0;i<active_size;i++)
+	{
+		double yG = y[i]*G[i];
+
+		if(is_upper_bound(i))
+		{
+			if(y[i]==-1)
+				ub = min(ub,yG);
+			else
+				lb = max(lb,yG);
+		}
+		else if(is_lower_bound(i))
+		{
+			if(y[i]==+1)
+				ub = min(ub,yG);
+			else
+				lb = max(lb,yG);
+		}
+		else
+		{
+			++nr_free;
+			sum_free += yG;
+		}
+	}
+
+	if(nr_free>0)
+		r = sum_free/nr_free;
+	else
+		r = (ub+lb)/2;
+
+	return r;
+}
+
+//
+// Solver for nu-svm classification and regression
+//
+// additional constraint: e^T \alpha = constant
+//
+class Solver_NU: public Solver
+{
+public:
+	Solver_NU() {}
+	void Solve(int l, const QMatrix& Q, const double *p, const schar *y,
+		   double *alpha, double Cp, double Cn, double eps,
+		   SolutionInfo* si, int shrinking)
+	{
+		this->si = si;
+		Solver::Solve(l,Q,p,y,alpha,Cp,Cn,eps,si,shrinking);
+	}
+private:
+	SolutionInfo *si;
+	int select_working_set(int &i, int &j);
+	double calculate_rho();
+	bool be_shrunk(int i, double Gmax1, double Gmax2, double Gmax3, double Gmax4);
+	void do_shrinking();
+};
+
+// return 1 if already optimal, return 0 otherwise
+int Solver_NU::select_working_set(int &out_i, int &out_j)
+{
+	// return i,j such that y_i = y_j and
+	// i: maximizes -y_i * grad(f)_i, i in I_up(\alpha)
+	// j: minimizes the decrease of obj value
+	//    (if quadratic coefficeint <= 0, replace it with tau)
+	//    -y_j*grad(f)_j < -y_i*grad(f)_i, j in I_low(\alpha)
+
+	double Gmaxp = -INF;
+	double Gmaxp2 = -INF;
+	int Gmaxp_idx = -1;
+
+	double Gmaxn = -INF;
+	double Gmaxn2 = -INF;
+	int Gmaxn_idx = -1;
+
+	int Gmin_idx = -1;
+	double obj_diff_min = INF;
+
+	for(int t=0;t<active_size;t++)
+		if(y[t]==+1)
+		{
+			if(!is_upper_bound(t))
+				if(-G[t] >= Gmaxp)
+				{
+					Gmaxp = -G[t];
+					Gmaxp_idx = t;
+				}
+		}
+		else
+		{
+			if(!is_lower_bound(t))
+				if(G[t] >= Gmaxn)
+				{
+					Gmaxn = G[t];
+					Gmaxn_idx = t;
+				}
+		}
+
+	int ip = Gmaxp_idx;
+	int in = Gmaxn_idx;
+	const Qfloat *Q_ip = NULL;
+	const Qfloat *Q_in = NULL;
+	if(ip != -1) // NULL Q_ip not accessed: Gmaxp=-INF if ip=-1
+		Q_ip = Q->get_Q(ip,active_size);
+	if(in != -1)
+		Q_in = Q->get_Q(in,active_size);
+
+	for(int j=0;j<active_size;j++)
+	{
+		if(y[j]==+1)
+		{
+			if (!is_lower_bound(j))
+			{
+				double grad_diff=Gmaxp+G[j];
+				if (G[j] >= Gmaxp2)
+					Gmaxp2 = G[j];
+				if (grad_diff > 0)
+				{
+					double obj_diff;
+					double quad_coef = QD[ip]+QD[j]-2*Q_ip[j];
+					if (quad_coef > 0)
+						obj_diff = -(grad_diff*grad_diff)/quad_coef;
+					else
+						obj_diff = -(grad_diff*grad_diff)/TAU;
+
+					if (obj_diff <= obj_diff_min)
+					{
+						Gmin_idx=j;
+						obj_diff_min = obj_diff;
+					}
+				}
+			}
+		}
+		else
+		{
+			if (!is_upper_bound(j))
+			{
+				double grad_diff=Gmaxn-G[j];
+				if (-G[j] >= Gmaxn2)
+					Gmaxn2 = -G[j];
+				if (grad_diff > 0)
+				{
+					double obj_diff;
+					double quad_coef = QD[in]+QD[j]-2*Q_in[j];
+					if (quad_coef > 0)
+						obj_diff = -(grad_diff*grad_diff)/quad_coef;
+					else
+						obj_diff = -(grad_diff*grad_diff)/TAU;
+
+					if (obj_diff <= obj_diff_min)
+					{
+						Gmin_idx=j;
+						obj_diff_min = obj_diff;
+					}
+				}
+			}
+		}
+	}
+
+	if(max(Gmaxp+Gmaxp2,Gmaxn+Gmaxn2) < eps || Gmin_idx == -1)
+		return 1;
+
+	if (y[Gmin_idx] == +1)
+		out_i = Gmaxp_idx;
+	else
+		out_i = Gmaxn_idx;
+	out_j = Gmin_idx;
+
+	return 0;
+}
+
+bool Solver_NU::be_shrunk(int i, double Gmax1, double Gmax2, double Gmax3, double Gmax4)
+{
+	if(is_upper_bound(i))
+	{
+		if(y[i]==+1)
+			return(-G[i] > Gmax1);
+		else
+			return(-G[i] > Gmax4);
+	}
+	else if(is_lower_bound(i))
+	{
+		if(y[i]==+1)
+			return(G[i] > Gmax2);
+		else
+			return(G[i] > Gmax3);
+	}
+	else
+		return(false);
+}
+
+void Solver_NU::do_shrinking()
+{
+	double Gmax1 = -INF;	// max { -y_i * grad(f)_i | y_i = +1, i in I_up(\alpha) }
+	double Gmax2 = -INF;	// max { y_i * grad(f)_i | y_i = +1, i in I_low(\alpha) }
+	double Gmax3 = -INF;	// max { -y_i * grad(f)_i | y_i = -1, i in I_up(\alpha) }
+	double Gmax4 = -INF;	// max { y_i * grad(f)_i | y_i = -1
