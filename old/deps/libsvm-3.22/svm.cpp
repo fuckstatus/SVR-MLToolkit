@@ -1163,4 +1163,296 @@ void Solver_NU::do_shrinking()
 	double Gmax1 = -INF;	// max { -y_i * grad(f)_i | y_i = +1, i in I_up(\alpha) }
 	double Gmax2 = -INF;	// max { y_i * grad(f)_i | y_i = +1, i in I_low(\alpha) }
 	double Gmax3 = -INF;	// max { -y_i * grad(f)_i | y_i = -1, i in I_up(\alpha) }
-	double Gmax4 = -INF;	// max { y_i * grad(f)_i | y_i = -1
+	double Gmax4 = -INF;	// max { y_i * grad(f)_i | y_i = -1, i in I_low(\alpha) }
+
+	// find maximal violating pair first
+	int i;
+	for(i=0;i<active_size;i++)
+	{
+		if(!is_upper_bound(i))
+		{
+			if(y[i]==+1)
+			{
+				if(-G[i] > Gmax1) Gmax1 = -G[i];
+			}
+			else	if(-G[i] > Gmax4) Gmax4 = -G[i];
+		}
+		if(!is_lower_bound(i))
+		{
+			if(y[i]==+1)
+			{
+				if(G[i] > Gmax2) Gmax2 = G[i];
+			}
+			else	if(G[i] > Gmax3) Gmax3 = G[i];
+		}
+	}
+
+	if(unshrink == false && max(Gmax1+Gmax2,Gmax3+Gmax4) <= eps*10)
+	{
+		unshrink = true;
+		reconstruct_gradient();
+		active_size = l;
+	}
+
+	for(i=0;i<active_size;i++)
+		if (be_shrunk(i, Gmax1, Gmax2, Gmax3, Gmax4))
+		{
+			active_size--;
+			while (active_size > i)
+			{
+				if (!be_shrunk(active_size, Gmax1, Gmax2, Gmax3, Gmax4))
+				{
+					swap_index(i,active_size);
+					break;
+				}
+				active_size--;
+			}
+		}
+}
+
+double Solver_NU::calculate_rho()
+{
+	int nr_free1 = 0,nr_free2 = 0;
+	double ub1 = INF, ub2 = INF;
+	double lb1 = -INF, lb2 = -INF;
+	double sum_free1 = 0, sum_free2 = 0;
+
+	for(int i=0;i<active_size;i++)
+	{
+		if(y[i]==+1)
+		{
+			if(is_upper_bound(i))
+				lb1 = max(lb1,G[i]);
+			else if(is_lower_bound(i))
+				ub1 = min(ub1,G[i]);
+			else
+			{
+				++nr_free1;
+				sum_free1 += G[i];
+			}
+		}
+		else
+		{
+			if(is_upper_bound(i))
+				lb2 = max(lb2,G[i]);
+			else if(is_lower_bound(i))
+				ub2 = min(ub2,G[i]);
+			else
+			{
+				++nr_free2;
+				sum_free2 += G[i];
+			}
+		}
+	}
+
+	double r1,r2;
+	if(nr_free1 > 0)
+		r1 = sum_free1/nr_free1;
+	else
+		r1 = (ub1+lb1)/2;
+
+	if(nr_free2 > 0)
+		r2 = sum_free2/nr_free2;
+	else
+		r2 = (ub2+lb2)/2;
+
+	si->r = (r1+r2)/2;
+	return (r1-r2)/2;
+}
+
+//
+// Q matrices for various formulations
+//
+class SVC_Q: public Kernel
+{
+public:
+	SVC_Q(const svm_problem& prob, const svm_parameter& param, const schar *y_)
+	:Kernel(prob.l, prob.x, param)
+	{
+		clone(y,y_,prob.l);
+		cache = new Cache(prob.l,(long int)(param.cache_size*(1<<20)));
+		QD = new double[prob.l];
+		for(int i=0;i<prob.l;i++)
+			QD[i] = (this->*kernel_function)(i,i);
+	}
+
+	Qfloat *get_Q(int i, int len) const
+	{
+		Qfloat *data;
+		int start, j;
+		if((start = cache->get_data(i,&data,len)) < len)
+		{
+			for(j=start;j<len;j++)
+				data[j] = (Qfloat)(y[i]*y[j]*(this->*kernel_function)(i,j));
+		}
+		return data;
+	}
+
+	double *get_QD() const
+	{
+		return QD;
+	}
+
+	void swap_index(int i, int j) const
+	{
+		cache->swap_index(i,j);
+		Kernel::swap_index(i,j);
+		swap(y[i],y[j]);
+		swap(QD[i],QD[j]);
+	}
+
+	~SVC_Q()
+	{
+		delete[] y;
+		delete cache;
+		delete[] QD;
+	}
+private:
+	schar *y;
+	Cache *cache;
+	double *QD;
+};
+
+class ONE_CLASS_Q: public Kernel
+{
+public:
+	ONE_CLASS_Q(const svm_problem& prob, const svm_parameter& param)
+	:Kernel(prob.l, prob.x, param)
+	{
+		cache = new Cache(prob.l,(long int)(param.cache_size*(1<<20)));
+		QD = new double[prob.l];
+		for(int i=0;i<prob.l;i++)
+			QD[i] = (this->*kernel_function)(i,i);
+	}
+
+	Qfloat *get_Q(int i, int len) const
+	{
+		Qfloat *data;
+		int start, j;
+		if((start = cache->get_data(i,&data,len)) < len)
+		{
+			for(j=start;j<len;j++)
+				data[j] = (Qfloat)(this->*kernel_function)(i,j);
+		}
+		return data;
+	}
+
+	double *get_QD() const
+	{
+		return QD;
+	}
+
+	void swap_index(int i, int j) const
+	{
+		cache->swap_index(i,j);
+		Kernel::swap_index(i,j);
+		swap(QD[i],QD[j]);
+	}
+
+	~ONE_CLASS_Q()
+	{
+		delete cache;
+		delete[] QD;
+	}
+private:
+	Cache *cache;
+	double *QD;
+};
+
+class SVR_Q: public Kernel
+{
+public:
+	SVR_Q(const svm_problem& prob, const svm_parameter& param)
+	:Kernel(prob.l, prob.x, param)
+	{
+		l = prob.l;
+		cache = new Cache(l,(long int)(param.cache_size*(1<<20)));
+		QD = new double[2*l];
+		sign = new schar[2*l];
+		index = new int[2*l];
+		for(int k=0;k<l;k++)
+		{
+			sign[k] = 1;
+			sign[k+l] = -1;
+			index[k] = k;
+			index[k+l] = k;
+			QD[k] = (this->*kernel_function)(k,k);
+			QD[k+l] = QD[k];
+		}
+		buffer[0] = new Qfloat[2*l];
+		buffer[1] = new Qfloat[2*l];
+		next_buffer = 0;
+	}
+
+	void swap_index(int i, int j) const
+	{
+		swap(sign[i],sign[j]);
+		swap(index[i],index[j]);
+		swap(QD[i],QD[j]);
+	}
+
+	Qfloat *get_Q(int i, int len) const
+	{
+		Qfloat *data;
+		int j, real_i = index[i];
+		if(cache->get_data(real_i,&data,l) < l)
+		{
+			for(j=0;j<l;j++)
+				data[j] = (Qfloat)(this->*kernel_function)(real_i,j);
+		}
+
+		// reorder and copy
+		Qfloat *buf = buffer[next_buffer];
+		next_buffer = 1 - next_buffer;
+		schar si = sign[i];
+		for(j=0;j<len;j++)
+			buf[j] = (Qfloat) si * (Qfloat) sign[j] * data[index[j]];
+		return buf;
+	}
+
+	double *get_QD() const
+	{
+		return QD;
+	}
+
+	~SVR_Q()
+	{
+		delete cache;
+		delete[] sign;
+		delete[] index;
+		delete[] buffer[0];
+		delete[] buffer[1];
+		delete[] QD;
+	}
+private:
+	int l;
+	Cache *cache;
+	schar *sign;
+	int *index;
+	mutable int next_buffer;
+	Qfloat *buffer[2];
+	double *QD;
+};
+
+//
+// construct and solve various formulations
+//
+static void solve_c_svc(
+	const svm_problem *prob, const svm_parameter* param,
+	double *alpha, Solver::SolutionInfo* si, double Cp, double Cn)
+{
+	int l = prob->l;
+	double *minus_ones = new double[l];
+	schar *y = new schar[l];
+
+	int i;
+
+	for(i=0;i<l;i++)
+	{
+		alpha[i] = 0;
+		minus_ones[i] = -1;
+		if(prob->y[i] > 0) y[i] = +1; else y[i] = -1;
+	}
+
+	Solver s;
+	s.Solve(l, SVC_Q(*prob,*param,y), minus_ones, y,
