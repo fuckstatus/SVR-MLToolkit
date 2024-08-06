@@ -1456,3 +1456,270 @@ static void solve_c_svc(
 
 	Solver s;
 	s.Solve(l, SVC_Q(*prob,*param,y), minus_ones, y,
+		alpha, Cp, Cn, param->eps, si, param->shrinking);
+
+	double sum_alpha=0;
+	for(i=0;i<l;i++)
+		sum_alpha += alpha[i];
+
+	if (Cp==Cn)
+		info("nu = %f\n", sum_alpha/(Cp*prob->l));
+
+	for(i=0;i<l;i++)
+		alpha[i] *= y[i];
+
+	delete[] minus_ones;
+	delete[] y;
+}
+
+static void solve_nu_svc(
+	const svm_problem *prob, const svm_parameter *param,
+	double *alpha, Solver::SolutionInfo* si)
+{
+	int i;
+	int l = prob->l;
+	double nu = param->nu;
+
+	schar *y = new schar[l];
+
+	for(i=0;i<l;i++)
+		if(prob->y[i]>0)
+			y[i] = +1;
+		else
+			y[i] = -1;
+
+	double sum_pos = nu*l/2;
+	double sum_neg = nu*l/2;
+
+	for(i=0;i<l;i++)
+		if(y[i] == +1)
+		{
+			alpha[i] = min(1.0,sum_pos);
+			sum_pos -= alpha[i];
+		}
+		else
+		{
+			alpha[i] = min(1.0,sum_neg);
+			sum_neg -= alpha[i];
+		}
+
+	double *zeros = new double[l];
+
+	for(i=0;i<l;i++)
+		zeros[i] = 0;
+
+	Solver_NU s;
+	s.Solve(l, SVC_Q(*prob,*param,y), zeros, y,
+		alpha, 1.0, 1.0, param->eps, si,  param->shrinking);
+	double r = si->r;
+
+	info("C = %f\n",1/r);
+
+	for(i=0;i<l;i++)
+		alpha[i] *= y[i]/r;
+
+	si->rho /= r;
+	si->obj /= (r*r);
+	si->upper_bound_p = 1/r;
+	si->upper_bound_n = 1/r;
+
+	delete[] y;
+	delete[] zeros;
+}
+
+static void solve_one_class(
+	const svm_problem *prob, const svm_parameter *param,
+	double *alpha, Solver::SolutionInfo* si)
+{
+	int l = prob->l;
+	double *zeros = new double[l];
+	schar *ones = new schar[l];
+	int i;
+
+	int n = (int)(param->nu*prob->l);	// # of alpha's at upper bound
+
+	for(i=0;i<n;i++)
+		alpha[i] = 1;
+	if(n<prob->l)
+		alpha[n] = param->nu * prob->l - n;
+	for(i=n+1;i<l;i++)
+		alpha[i] = 0;
+
+	for(i=0;i<l;i++)
+	{
+		zeros[i] = 0;
+		ones[i] = 1;
+	}
+
+	Solver s;
+	s.Solve(l, ONE_CLASS_Q(*prob,*param), zeros, ones,
+		alpha, 1.0, 1.0, param->eps, si, param->shrinking);
+
+	delete[] zeros;
+	delete[] ones;
+}
+
+static void solve_epsilon_svr(
+	const svm_problem *prob, const svm_parameter *param,
+	double *alpha, Solver::SolutionInfo* si)
+{
+	int l = prob->l;
+	double *alpha2 = new double[2*l];
+	double *linear_term = new double[2*l];
+	schar *y = new schar[2*l];
+	int i;
+
+	for(i=0;i<l;i++)
+	{
+		alpha2[i] = 0;
+		linear_term[i] = param->p - prob->y[i];
+		y[i] = 1;
+
+		alpha2[i+l] = 0;
+		linear_term[i+l] = param->p + prob->y[i];
+		y[i+l] = -1;
+	}
+
+	Solver s;
+	s.Solve(2*l, SVR_Q(*prob,*param), linear_term, y,
+		alpha2, param->C, param->C, param->eps, si, param->shrinking);
+
+	double sum_alpha = 0;
+	for(i=0;i<l;i++)
+	{
+		alpha[i] = alpha2[i] - alpha2[i+l];
+		sum_alpha += fabs(alpha[i]);
+	}
+	info("nu = %f\n",sum_alpha/(param->C*l));
+
+	delete[] alpha2;
+	delete[] linear_term;
+	delete[] y;
+}
+
+static void solve_nu_svr(
+	const svm_problem *prob, const svm_parameter *param,
+	double *alpha, Solver::SolutionInfo* si)
+{
+	int l = prob->l;
+	double C = param->C;
+	double *alpha2 = new double[2*l];
+	double *linear_term = new double[2*l];
+	schar *y = new schar[2*l];
+	int i;
+
+	double sum = C * param->nu * l / 2;
+	for(i=0;i<l;i++)
+	{
+		alpha2[i] = alpha2[i+l] = min(sum,C);
+		sum -= alpha2[i];
+
+		linear_term[i] = - prob->y[i];
+		y[i] = 1;
+
+		linear_term[i+l] = prob->y[i];
+		y[i+l] = -1;
+	}
+
+	Solver_NU s;
+	s.Solve(2*l, SVR_Q(*prob,*param), linear_term, y,
+		alpha2, C, C, param->eps, si, param->shrinking);
+
+	info("epsilon = %f\n",-si->r);
+
+	for(i=0;i<l;i++)
+		alpha[i] = alpha2[i] - alpha2[i+l];
+
+	delete[] alpha2;
+	delete[] linear_term;
+	delete[] y;
+}
+
+//
+// decision_function
+//
+struct decision_function
+{
+	double *alpha;
+	double rho;
+};
+
+static decision_function svm_train_one(
+	const svm_problem *prob, const svm_parameter *param,
+	double Cp, double Cn)
+{
+	double *alpha = Malloc(double,prob->l);
+	Solver::SolutionInfo si;
+	switch(param->svm_type)
+	{
+		case C_SVC:
+			solve_c_svc(prob,param,alpha,&si,Cp,Cn);
+			break;
+		case NU_SVC:
+			solve_nu_svc(prob,param,alpha,&si);
+			break;
+		case ONE_CLASS:
+			solve_one_class(prob,param,alpha,&si);
+			break;
+		case EPSILON_SVR:
+			solve_epsilon_svr(prob,param,alpha,&si);
+			break;
+		case NU_SVR:
+			solve_nu_svr(prob,param,alpha,&si);
+			break;
+	}
+
+	info("obj = %f, rho = %f\n",si.obj,si.rho);
+
+	// output SVs
+
+	int nSV = 0;
+	int nBSV = 0;
+	for(int i=0;i<prob->l;i++)
+	{
+		if(fabs(alpha[i]) > 0)
+		{
+			++nSV;
+			if(prob->y[i] > 0)
+			{
+				if(fabs(alpha[i]) >= si.upper_bound_p)
+					++nBSV;
+			}
+			else
+			{
+				if(fabs(alpha[i]) >= si.upper_bound_n)
+					++nBSV;
+			}
+		}
+	}
+
+	info("nSV = %d, nBSV = %d\n",nSV,nBSV);
+
+	decision_function f;
+	f.alpha = alpha;
+	f.rho = si.rho;
+	return f;
+}
+
+// Platt's binary SVM Probablistic Output: an improvement from Lin et al.
+static void sigmoid_train(
+	int l, const double *dec_values, const double *labels,
+	double& A, double& B)
+{
+	double prior1=0, prior0 = 0;
+	int i;
+
+	for (i=0;i<l;i++)
+		if (labels[i] > 0) prior1+=1;
+		else prior0+=1;
+
+	int max_iter=100;	// Maximal number of iterations
+	double min_step=1e-10;	// Minimal step taken in line search
+	double sigma=1e-12;	// For numerically strict PD of Hessian
+	double eps=1e-5;
+	double hiTarget=(prior1+1.0)/(prior1+2.0);
+	double loTarget=1/(prior0+2.0);
+	double *t=Malloc(double,l);
+	double fApB,p,q,h11,h22,h21,g1,g2,det,dA,dB,gd,stepsize;
+	double newA,newB,newf,d1,d2;
+	int iter
