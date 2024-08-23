@@ -1961,4 +1961,220 @@ static void svm_binary_svc_probability(
 			struct svm_model *submodel = svm_train(&subprob,&subparam);
 			for(j=begin;j<end;j++)
 			{
-				svm_pre
+				svm_predict_values(submodel,prob->x[perm[j]],&(dec_values[perm[j]]));
+				// ensure +1 -1 order; reason not using CV subroutine
+				dec_values[perm[j]] *= submodel->label[0];
+			}
+			svm_free_and_destroy_model(&submodel);
+			svm_destroy_param(&subparam);
+		}
+		free(subprob.x);
+		free(subprob.y);
+	}
+	sigmoid_train(prob->l,dec_values,prob->y,probA,probB);
+	free(dec_values);
+	free(perm);
+}
+
+// Return parameter of a Laplace distribution
+static double svm_svr_probability(
+	const svm_problem *prob, const svm_parameter *param)
+{
+	int i;
+	int nr_fold = 5;
+	double *ymv = Malloc(double,prob->l);
+	double mae = 0;
+
+	svm_parameter newparam = *param;
+	newparam.probability = 0;
+	svm_cross_validation(prob,&newparam,nr_fold,ymv);
+	for(i=0;i<prob->l;i++)
+	{
+		ymv[i]=prob->y[i]-ymv[i];
+		mae += fabs(ymv[i]);
+	}
+	mae /= prob->l;
+	double std=sqrt(2*mae*mae);
+	int count=0;
+	mae=0;
+	for(i=0;i<prob->l;i++)
+		if (fabs(ymv[i]) > 5*std)
+			count=count+1;
+		else
+			mae+=fabs(ymv[i]);
+	mae /= (prob->l-count);
+	info("Prob. model for test data: target value = predicted value + z,\nz: Laplace distribution e^(-|z|/sigma)/(2sigma),sigma= %g\n",mae);
+	free(ymv);
+	return mae;
+}
+
+
+// label: label name, start: begin of each class, count: #data of classes, perm: indices to the original data
+// perm, length l, must be allocated before calling this subroutine
+static void svm_group_classes(const svm_problem *prob, int *nr_class_ret, int **label_ret, int **start_ret, int **count_ret, int *perm)
+{
+	int l = prob->l;
+	int max_nr_class = 16;
+	int nr_class = 0;
+	int *label = Malloc(int,max_nr_class);
+	int *count = Malloc(int,max_nr_class);
+	int *data_label = Malloc(int,l);
+	int i;
+
+	for(i=0;i<l;i++)
+	{
+		int this_label = (int)prob->y[i];
+		int j;
+		for(j=0;j<nr_class;j++)
+		{
+			if(this_label == label[j])
+			{
+				++count[j];
+				break;
+			}
+		}
+		data_label[i] = j;
+		if(j == nr_class)
+		{
+			if(nr_class == max_nr_class)
+			{
+				max_nr_class *= 2;
+				label = (int *)realloc(label,max_nr_class*sizeof(int));
+				count = (int *)realloc(count,max_nr_class*sizeof(int));
+			}
+			label[nr_class] = this_label;
+			count[nr_class] = 1;
+			++nr_class;
+		}
+	}
+
+	//
+	// Labels are ordered by their first occurrence in the training set.
+	// However, for two-class sets with -1/+1 labels and -1 appears first,
+	// we swap labels to ensure that internally the binary SVM has positive data corresponding to the +1 instances.
+	//
+	if (nr_class == 2 && label[0] == -1 && label[1] == 1)
+	{
+		swap(label[0],label[1]);
+		swap(count[0],count[1]);
+		for(i=0;i<l;i++)
+		{
+			if(data_label[i] == 0)
+				data_label[i] = 1;
+			else
+				data_label[i] = 0;
+		}
+	}
+
+	int *start = Malloc(int,nr_class);
+	start[0] = 0;
+	for(i=1;i<nr_class;i++)
+		start[i] = start[i-1]+count[i-1];
+	for(i=0;i<l;i++)
+	{
+		perm[start[data_label[i]]] = i;
+		++start[data_label[i]];
+	}
+	start[0] = 0;
+	for(i=1;i<nr_class;i++)
+		start[i] = start[i-1]+count[i-1];
+
+	*nr_class_ret = nr_class;
+	*label_ret = label;
+	*start_ret = start;
+	*count_ret = count;
+	free(data_label);
+}
+
+//
+// Interface functions
+//
+svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
+{
+	svm_model *model = Malloc(svm_model,1);
+	model->param = *param;
+	model->free_sv = 0;	// XXX
+
+	/*
+	printf("H %d %d\n", param->svm_type, prob->l);
+	for(int i=0;i<prob->l;i++)
+		printf("%g ", prob->y[i]);
+	printf("\n");
+	svm_node **x = Malloc(svm_node *,prob->l);
+	int i;
+	for(i=0;i<prob->l;i++)
+		x[i] = prob->x[i];
+	for(int i=0;i<prob->l;i++)
+		printf("%g ", x[i]->value);
+	printf("\n");
+	free(x);
+	*/
+	if(param->svm_type == ONE_CLASS ||
+	   param->svm_type == EPSILON_SVR ||
+	   param->svm_type == NU_SVR)
+	{
+		// regression or one-class-svm
+		model->nr_class = 2;
+		model->label = NULL;
+		model->nSV = NULL;
+		model->probA = NULL; model->probB = NULL;
+		model->sv_coef = Malloc(double *,1);
+
+		if(param->probability &&
+		   (param->svm_type == EPSILON_SVR ||
+		    param->svm_type == NU_SVR))
+		{
+			model->probA = Malloc(double,1);
+			model->probA[0] = svm_svr_probability(prob,param);
+		}
+
+		decision_function f = svm_train_one(prob,param,0,0);
+		model->rho = Malloc(double,1);
+		model->rho[0] = f.rho;
+
+		int nSV = 0;
+		int i;
+		for(i=0;i<prob->l;i++)
+			if(fabs(f.alpha[i]) > 0) ++nSV;
+		model->l = nSV;
+		model->SV = Malloc(svm_node *,nSV);
+		model->sv_coef[0] = Malloc(double,nSV);
+		model->sv_indices = Malloc(int,nSV);
+		int j = 0;
+		for(i=0;i<prob->l;i++)
+			if(fabs(f.alpha[i]) > 0)
+			{
+				model->SV[j] = prob->x[i];
+				model->sv_coef[0][j] = f.alpha[i];
+				model->sv_indices[j] = i+1;
+				++j;
+			}
+
+		free(f.alpha);
+	}
+	else
+	{
+		// classification
+		int l = prob->l;
+		int nr_class;
+		int *label = NULL;
+		int *start = NULL;
+		int *count = NULL;
+		int *perm = Malloc(int,l);
+
+		// group training data of the same class
+		svm_group_classes(prob,&nr_class,&label,&start,&count,perm);
+		if(nr_class == 1)
+			info("WARNING: training data in only one class. See README for details.\n");
+
+		svm_node **x = Malloc(svm_node *,l);
+		int i;
+		for(i=0;i<l;i++)
+			x[i] = prob->x[perm[i]];
+
+		// calculate weighted C
+
+		double *weighted_C = Malloc(double, nr_class);
+		for(i=0;i<nr_class;i++)
+			weighted_C[i] = param->C;
+		for(i=0;i
