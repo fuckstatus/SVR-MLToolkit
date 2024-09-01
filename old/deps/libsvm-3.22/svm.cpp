@@ -2389,4 +2389,230 @@ void svm_cross_validation(const svm_problem *prob, const svm_parameter *param, i
 		{
 			fold_count[i] = 0;
 			for (c=0; c<nr_class;c++)
-				fold_count[i]+=(i+1)*count[c]/nr_fold-i*count[c]/nr_fo
+				fold_count[i]+=(i+1)*count[c]/nr_fold-i*count[c]/nr_fold;
+		}
+		fold_start[0]=0;
+		for (i=1;i<=nr_fold;i++)
+			fold_start[i] = fold_start[i-1]+fold_count[i-1];
+		for (c=0; c<nr_class;c++)
+			for(i=0;i<nr_fold;i++)
+			{
+				int begin = start[c]+i*count[c]/nr_fold;
+				int end = start[c]+(i+1)*count[c]/nr_fold;
+				for(int j=begin;j<end;j++)
+				{
+					perm[fold_start[i]] = index[j];
+					fold_start[i]++;
+				}
+			}
+		fold_start[0]=0;
+		for (i=1;i<=nr_fold;i++)
+			fold_start[i] = fold_start[i-1]+fold_count[i-1];
+		free(start);
+		free(label);
+		free(count);
+		free(index);
+		free(fold_count);
+	}
+	else
+	{
+		for(i=0;i<l;i++) perm[i]=i;
+		for(i=0;i<l;i++)
+		{
+			int j = i+rand()%(l-i);
+			swap(perm[i],perm[j]);
+		}
+		for(i=0;i<=nr_fold;i++)
+			fold_start[i]=i*l/nr_fold;
+	}
+
+	for(i=0;i<nr_fold;i++)
+	{
+		int begin = fold_start[i];
+		int end = fold_start[i+1];
+		int j,k;
+		struct svm_problem subprob;
+
+		subprob.l = l-(end-begin);
+		subprob.x = Malloc(struct svm_node*,subprob.l);
+		subprob.y = Malloc(double,subprob.l);
+
+		k=0;
+		for(j=0;j<begin;j++)
+		{
+			subprob.x[k] = prob->x[perm[j]];
+			subprob.y[k] = prob->y[perm[j]];
+			++k;
+		}
+		for(j=end;j<l;j++)
+		{
+			subprob.x[k] = prob->x[perm[j]];
+			subprob.y[k] = prob->y[perm[j]];
+			++k;
+		}
+		struct svm_model *submodel = svm_train(&subprob,param);
+		if(param->probability &&
+		   (param->svm_type == C_SVC || param->svm_type == NU_SVC))
+		{
+			double *prob_estimates=Malloc(double,svm_get_nr_class(submodel));
+			for(j=begin;j<end;j++)
+				target[perm[j]] = svm_predict_probability(submodel,prob->x[perm[j]],prob_estimates);
+			free(prob_estimates);
+		}
+		else
+			for(j=begin;j<end;j++)
+				target[perm[j]] = svm_predict(submodel,prob->x[perm[j]]);
+		svm_free_and_destroy_model(&submodel);
+		free(subprob.x);
+		free(subprob.y);
+	}
+	free(fold_start);
+	free(perm);
+}
+
+
+int svm_get_svm_type(const svm_model *model)
+{
+	return model->param.svm_type;
+}
+
+int svm_get_nr_class(const svm_model *model)
+{
+	return model->nr_class;
+}
+
+void svm_get_labels(const svm_model *model, int* label)
+{
+	if (model->label != NULL)
+		for(int i=0;i<model->nr_class;i++)
+			label[i] = model->label[i];
+}
+
+void svm_get_sv_indices(const svm_model *model, int* indices)
+{
+	if (model->sv_indices != NULL)
+		for(int i=0;i<model->l;i++)
+			indices[i] = model->sv_indices[i];
+}
+
+int svm_get_nr_sv(const svm_model *model)
+{
+	return model->l;
+}
+
+double svm_get_svr_probability(const svm_model *model)
+{
+	if ((model->param.svm_type == EPSILON_SVR || model->param.svm_type == NU_SVR) &&
+	    model->probA!=NULL)
+		return model->probA[0];
+	else
+	{
+		fprintf(stderr,"Model doesn't contain information for SVR probability inference\n");
+		return 0;
+	}
+}
+
+double svm_predict_values(const svm_model *model, const svm_node *x, double* dec_values)
+{
+	int i;
+	if(model->param.svm_type == ONE_CLASS ||
+	   model->param.svm_type == EPSILON_SVR ||
+	   model->param.svm_type == NU_SVR)
+	{
+		double *sv_coef = model->sv_coef[0];
+		double sum = 0;
+		for(i=0;i<model->l;i++)
+			sum += sv_coef[i] * Kernel::k_function(x,model->SV[i],model->param);
+		sum -= model->rho[0];
+		*dec_values = sum;
+
+		if(model->param.svm_type == ONE_CLASS)
+			return (sum>0)?1:-1;
+		else
+			return sum;
+	}
+	else
+	{
+		int nr_class = model->nr_class;
+		int l = model->l;
+
+		double *kvalue = Malloc(double,l);
+		for(i=0;i<l;i++)
+			kvalue[i] = Kernel::k_function(x,model->SV[i],model->param);
+
+		int *start = Malloc(int,nr_class);
+		start[0] = 0;
+		for(i=1;i<nr_class;i++)
+			start[i] = start[i-1]+model->nSV[i-1];
+
+		int *vote = Malloc(int,nr_class);
+		for(i=0;i<nr_class;i++)
+			vote[i] = 0;
+
+		int p=0;
+		for(i=0;i<nr_class;i++)
+			for(int j=i+1;j<nr_class;j++)
+			{
+				double sum = 0;
+				int si = start[i];
+				int sj = start[j];
+				int ci = model->nSV[i];
+				int cj = model->nSV[j];
+
+				int k;
+				double *coef1 = model->sv_coef[j-1];
+				double *coef2 = model->sv_coef[i];
+				for(k=0;k<ci;k++)
+					sum += coef1[si+k] * kvalue[si+k];
+				for(k=0;k<cj;k++)
+					sum += coef2[sj+k] * kvalue[sj+k];
+				sum -= model->rho[p];
+				dec_values[p] = sum;
+
+				if(dec_values[p] > 0)
+					++vote[i];
+				else
+					++vote[j];
+				p++;
+			}
+
+		int vote_max_idx = 0;
+		for(i=1;i<nr_class;i++)
+			if(vote[i] > vote[vote_max_idx])
+				vote_max_idx = i;
+
+		free(kvalue);
+		free(start);
+		free(vote);
+		return model->label[vote_max_idx];
+	}
+}
+
+double svm_predict(const svm_model *model, const svm_node *x)
+{
+	int nr_class = model->nr_class;
+	double *dec_values;
+	if(model->param.svm_type == ONE_CLASS ||
+	   model->param.svm_type == EPSILON_SVR ||
+	   model->param.svm_type == NU_SVR)
+		dec_values = Malloc(double, 1);
+	else
+		dec_values = Malloc(double, nr_class*(nr_class-1)/2);
+	double pred_result = svm_predict_values(model, x, dec_values);
+	free(dec_values);
+	return pred_result;
+}
+
+double svm_predict_probability(
+	const svm_model *model, const svm_node *x, double *prob_estimates)
+{
+	if ((model->param.svm_type == C_SVC || model->param.svm_type == NU_SVC) &&
+	    model->probA!=NULL && model->probB!=NULL)
+	{
+		int i;
+		int nr_class = model->nr_class;
+		double *dec_values = Malloc(double, nr_class*(nr_class-1)/2);
+		svm_predict_values(model, x, dec_values);
+
+		double min_prob=1e-7;
+		double **pairwise_prob=Malloc(double *,nr_class);
