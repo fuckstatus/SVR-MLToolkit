@@ -2177,4 +2177,216 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		double *weighted_C = Malloc(double, nr_class);
 		for(i=0;i<nr_class;i++)
 			weighted_C[i] = param->C;
-		for(i=0;i
+		for(i=0;i<param->nr_weight;i++)
+		{
+			int j;
+			for(j=0;j<nr_class;j++)
+				if(param->weight_label[i] == label[j])
+					break;
+			if(j == nr_class)
+				fprintf(stderr,"WARNING: class label %d specified in weight is not found\n", param->weight_label[i]);
+			else
+				weighted_C[j] *= param->weight[i];
+		}
+
+		// train k*(k-1)/2 models
+
+		bool *nonzero = Malloc(bool,l);
+		for(i=0;i<l;i++)
+			nonzero[i] = false;
+		decision_function *f = Malloc(decision_function,nr_class*(nr_class-1)/2);
+
+		double *probA=NULL,*probB=NULL;
+		if (param->probability)
+		{
+			probA=Malloc(double,nr_class*(nr_class-1)/2);
+			probB=Malloc(double,nr_class*(nr_class-1)/2);
+		}
+
+		int p = 0;
+		for(i=0;i<nr_class;i++)
+			for(int j=i+1;j<nr_class;j++)
+			{
+				svm_problem sub_prob;
+				int si = start[i], sj = start[j];
+				int ci = count[i], cj = count[j];
+				sub_prob.l = ci+cj;
+				sub_prob.x = Malloc(svm_node *,sub_prob.l);
+				sub_prob.y = Malloc(double,sub_prob.l);
+				int k;
+				for(k=0;k<ci;k++)
+				{
+					sub_prob.x[k] = x[si+k];
+					sub_prob.y[k] = +1;
+				}
+				for(k=0;k<cj;k++)
+				{
+					sub_prob.x[ci+k] = x[sj+k];
+					sub_prob.y[ci+k] = -1;
+				}
+
+				if(param->probability)
+					svm_binary_svc_probability(&sub_prob,param,weighted_C[i],weighted_C[j],probA[p],probB[p]);
+
+				f[p] = svm_train_one(&sub_prob,param,weighted_C[i],weighted_C[j]);
+				for(k=0;k<ci;k++)
+					if(!nonzero[si+k] && fabs(f[p].alpha[k]) > 0)
+						nonzero[si+k] = true;
+				for(k=0;k<cj;k++)
+					if(!nonzero[sj+k] && fabs(f[p].alpha[ci+k]) > 0)
+						nonzero[sj+k] = true;
+				free(sub_prob.x);
+				free(sub_prob.y);
+				++p;
+			}
+
+		// build output
+
+		model->nr_class = nr_class;
+
+		model->label = Malloc(int,nr_class);
+		for(i=0;i<nr_class;i++)
+			model->label[i] = label[i];
+
+		model->rho = Malloc(double,nr_class*(nr_class-1)/2);
+		for(i=0;i<nr_class*(nr_class-1)/2;i++)
+			model->rho[i] = f[i].rho;
+
+		if(param->probability)
+		{
+			model->probA = Malloc(double,nr_class*(nr_class-1)/2);
+			model->probB = Malloc(double,nr_class*(nr_class-1)/2);
+			for(i=0;i<nr_class*(nr_class-1)/2;i++)
+			{
+				model->probA[i] = probA[i];
+				model->probB[i] = probB[i];
+			}
+		}
+		else
+		{
+			model->probA=NULL;
+			model->probB=NULL;
+		}
+
+		int total_sv = 0;
+		int *nz_count = Malloc(int,nr_class);
+		model->nSV = Malloc(int,nr_class);
+		for(i=0;i<nr_class;i++)
+		{
+			int nSV = 0;
+			for(int j=0;j<count[i];j++)
+				if(nonzero[start[i]+j])
+				{
+					++nSV;
+					++total_sv;
+				}
+			model->nSV[i] = nSV;
+			nz_count[i] = nSV;
+		}
+
+		info("Total nSV = %d\n",total_sv);
+
+		model->l = total_sv;
+		model->SV = Malloc(svm_node *,total_sv);
+		model->sv_indices = Malloc(int,total_sv);
+		p = 0;
+		for(i=0;i<l;i++)
+			if(nonzero[i])
+			{
+				model->SV[p] = x[i];
+				model->sv_indices[p++] = perm[i] + 1;
+			}
+
+		int *nz_start = Malloc(int,nr_class);
+		nz_start[0] = 0;
+		for(i=1;i<nr_class;i++)
+			nz_start[i] = nz_start[i-1]+nz_count[i-1];
+
+		model->sv_coef = Malloc(double *,nr_class-1);
+		for(i=0;i<nr_class-1;i++)
+			model->sv_coef[i] = Malloc(double,total_sv);
+
+		p = 0;
+		for(i=0;i<nr_class;i++)
+			for(int j=i+1;j<nr_class;j++)
+			{
+				// classifier (i,j): coefficients with
+				// i are in sv_coef[j-1][nz_start[i]...],
+				// j are in sv_coef[i][nz_start[j]...]
+
+				int si = start[i];
+				int sj = start[j];
+				int ci = count[i];
+				int cj = count[j];
+
+				int q = nz_start[i];
+				int k;
+				for(k=0;k<ci;k++)
+					if(nonzero[si+k])
+						model->sv_coef[j-1][q++] = f[p].alpha[k];
+				q = nz_start[j];
+				for(k=0;k<cj;k++)
+					if(nonzero[sj+k])
+						model->sv_coef[i][q++] = f[p].alpha[ci+k];
+				++p;
+			}
+
+		free(label);
+		free(probA);
+		free(probB);
+		free(count);
+		free(perm);
+		free(start);
+		free(x);
+		free(weighted_C);
+		free(nonzero);
+		for(i=0;i<nr_class*(nr_class-1)/2;i++)
+			free(f[i].alpha);
+		free(f);
+		free(nz_count);
+		free(nz_start);
+	}
+	return model;
+}
+
+// Stratified cross validation
+void svm_cross_validation(const svm_problem *prob, const svm_parameter *param, int nr_fold, double *target)
+{
+	int i;
+	int *fold_start;
+	int l = prob->l;
+	int *perm = Malloc(int,l);
+	int nr_class;
+	if (nr_fold > l)
+	{
+		nr_fold = l;
+		fprintf(stderr,"WARNING: # folds > # data. Will use # folds = # data instead (i.e., leave-one-out cross validation)\n");
+	}
+	fold_start = Malloc(int,nr_fold+1);
+	// stratified cv may not give leave-one-out rate
+	// Each class to l folds -> some folds may have zero elements
+	if((param->svm_type == C_SVC ||
+	    param->svm_type == NU_SVC) && nr_fold < l)
+	{
+		int *start = NULL;
+		int *label = NULL;
+		int *count = NULL;
+		svm_group_classes(prob,&nr_class,&label,&start,&count,perm);
+
+		// random shuffle and then data grouped by fold using the array perm
+		int *fold_count = Malloc(int,nr_fold);
+		int c;
+		int *index = Malloc(int,l);
+		for(i=0;i<l;i++)
+			index[i]=perm[i];
+		for (c=0; c<nr_class; c++)
+			for(i=0;i<count[c];i++)
+			{
+				int j = i+rand()%(count[c]-i);
+				swap(index[start[c]+j],index[start[c]+i]);
+			}
+		for(i=0;i<nr_fold;i++)
+		{
+			fold_count[i] = 0;
+			for (c=0; c<nr_class;c++)
+				fold_count[i]+=(i+1)*count[c]/nr_fold-i*count[c]/nr_fo
