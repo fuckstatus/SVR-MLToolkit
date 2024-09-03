@@ -2616,3 +2616,234 @@ double svm_predict_probability(
 
 		double min_prob=1e-7;
 		double **pairwise_prob=Malloc(double *,nr_class);
+		for(i=0;i<nr_class;i++)
+			pairwise_prob[i]=Malloc(double,nr_class);
+		int k=0;
+		for(i=0;i<nr_class;i++)
+			for(int j=i+1;j<nr_class;j++)
+			{
+				pairwise_prob[i][j]=min(max(sigmoid_predict(dec_values[k],model->probA[k],model->probB[k]),min_prob),1-min_prob);
+				pairwise_prob[j][i]=1-pairwise_prob[i][j];
+				k++;
+			}
+		if (nr_class == 2)
+		{
+			prob_estimates[0] = pairwise_prob[0][1];
+			prob_estimates[1] = pairwise_prob[1][0];
+		}
+		else
+			multiclass_probability(nr_class,pairwise_prob,prob_estimates);
+
+		int prob_max_idx = 0;
+		for(i=1;i<nr_class;i++)
+			if(prob_estimates[i] > prob_estimates[prob_max_idx])
+				prob_max_idx = i;
+		for(i=0;i<nr_class;i++)
+			free(pairwise_prob[i]);
+		free(dec_values);
+		free(pairwise_prob);
+		return model->label[prob_max_idx];
+	}
+	else
+		return svm_predict(model, x);
+}
+
+static const char *svm_type_table[] =
+{
+	"c_svc","nu_svc","one_class","epsilon_svr","nu_svr",NULL
+};
+
+static const char *kernel_type_table[]=
+{
+	"linear","polynomial","rbf","sigmoid","precomputed",NULL
+};
+
+int svm_save_model(const char *model_file_name, const svm_model *model)
+{
+	FILE *fp = fopen(model_file_name,"w");
+	if(fp==NULL) return -1;
+
+	char *old_locale = setlocale(LC_ALL, NULL);
+	if (old_locale) {
+		old_locale = strdup(old_locale);
+	}
+	setlocale(LC_ALL, "C");
+
+	const svm_parameter& param = model->param;
+
+	fprintf(fp,"svm_type %s\n", svm_type_table[param.svm_type]);
+	fprintf(fp,"kernel_type %s\n", kernel_type_table[param.kernel_type]);
+
+	if(param.kernel_type == POLY)
+		fprintf(fp,"degree %d\n", param.degree);
+
+	if(param.kernel_type == POLY || param.kernel_type == RBF || param.kernel_type == SIGMOID)
+		fprintf(fp,"gamma %g\n", param.gamma);
+
+	if(param.kernel_type == POLY || param.kernel_type == SIGMOID)
+		fprintf(fp,"coef0 %g\n", param.coef0);
+
+	int nr_class = model->nr_class;
+	int l = model->l;
+	fprintf(fp, "nr_class %d\n", nr_class);
+	fprintf(fp, "total_sv %d\n",l);
+
+	{
+		fprintf(fp, "rho");
+		for(int i=0;i<nr_class*(nr_class-1)/2;i++)
+			fprintf(fp," %g",model->rho[i]);
+		fprintf(fp, "\n");
+	}
+
+	if(model->label)
+	{
+		fprintf(fp, "label");
+		for(int i=0;i<nr_class;i++)
+			fprintf(fp," %d",model->label[i]);
+		fprintf(fp, "\n");
+	}
+
+	if(model->probA) // regression has probA only
+	{
+		fprintf(fp, "probA");
+		for(int i=0;i<nr_class*(nr_class-1)/2;i++)
+			fprintf(fp," %g",model->probA[i]);
+		fprintf(fp, "\n");
+	}
+	if(model->probB)
+	{
+		fprintf(fp, "probB");
+		for(int i=0;i<nr_class*(nr_class-1)/2;i++)
+			fprintf(fp," %g",model->probB[i]);
+		fprintf(fp, "\n");
+	}
+
+	if(model->nSV)
+	{
+		fprintf(fp, "nr_sv");
+		for(int i=0;i<nr_class;i++)
+			fprintf(fp," %d",model->nSV[i]);
+		fprintf(fp, "\n");
+	}
+
+	fprintf(fp, "SV\n");
+	const double * const *sv_coef = model->sv_coef;
+	const svm_node * const *SV = model->SV;
+
+	for(int i=0;i<l;i++)
+	{
+		for(int j=0;j<nr_class-1;j++)
+			fprintf(fp, "%.16g ",sv_coef[j][i]);
+
+		const svm_node *p = SV[i];
+
+		if(param.kernel_type == PRECOMPUTED)
+			fprintf(fp,"0:%d ",(int)(p->value));
+		else
+			while(p->index != -1)
+			{
+				fprintf(fp,"%d:%.8g ",p->index,p->value);
+				p++;
+			}
+		fprintf(fp, "\n");
+	}
+
+	setlocale(LC_ALL, old_locale);
+	free(old_locale);
+
+	if (ferror(fp) != 0 || fclose(fp) != 0) return -1;
+	else return 0;
+}
+
+static char *line = NULL;
+static int max_line_len;
+
+static char* readline(FILE *input)
+{
+	int len;
+
+	if(fgets(line,max_line_len,input) == NULL)
+		return NULL;
+
+	while(strrchr(line,'\n') == NULL)
+	{
+		max_line_len *= 2;
+		line = (char *) realloc(line,max_line_len);
+		len = (int) strlen(line);
+		if(fgets(line+len,max_line_len-len,input) == NULL)
+			break;
+	}
+	return line;
+}
+
+//
+// FSCANF helps to handle fscanf failures.
+// Its do-while block avoids the ambiguity when
+// if (...)
+//    FSCANF();
+// is used
+//
+#define FSCANF(_stream, _format, _var) do{ if (fscanf(_stream, _format, _var) != 1) return false; }while(0)
+bool read_model_header(FILE *fp, svm_model* model)
+{
+	svm_parameter& param = model->param;
+	// parameters for training only won't be assigned, but arrays are assigned as NULL for safety
+	param.nr_weight = 0;
+	param.weight_label = NULL;
+	param.weight = NULL;
+
+	char cmd[81];
+	while(1)
+	{
+		FSCANF(fp,"%80s",cmd);
+
+		if(strcmp(cmd,"svm_type")==0)
+		{
+			FSCANF(fp,"%80s",cmd);
+			int i;
+			for(i=0;svm_type_table[i];i++)
+			{
+				if(strcmp(svm_type_table[i],cmd)==0)
+				{
+					param.svm_type=i;
+					break;
+				}
+			}
+			if(svm_type_table[i] == NULL)
+			{
+				fprintf(stderr,"unknown svm type.\n");
+				return false;
+			}
+		}
+		else if(strcmp(cmd,"kernel_type")==0)
+		{
+			FSCANF(fp,"%80s",cmd);
+			int i;
+			for(i=0;kernel_type_table[i];i++)
+			{
+				if(strcmp(kernel_type_table[i],cmd)==0)
+				{
+					param.kernel_type=i;
+					break;
+				}
+			}
+			if(kernel_type_table[i] == NULL)
+			{
+				fprintf(stderr,"unknown kernel function.\n");
+				return false;
+			}
+		}
+		else if(strcmp(cmd,"degree")==0)
+			FSCANF(fp,"%d",&param.degree);
+		else if(strcmp(cmd,"gamma")==0)
+			FSCANF(fp,"%lf",&param.gamma);
+		else if(strcmp(cmd,"coef0")==0)
+			FSCANF(fp,"%lf",&param.coef0);
+		else if(strcmp(cmd,"nr_class")==0)
+			FSCANF(fp,"%d",&model->nr_class);
+		else if(strcmp(cmd,"total_sv")==0)
+			FSCANF(fp,"%d",&model->l);
+		else if(strcmp(cmd,"rho")==0)
+		{
+			int n = model->nr_class * (model->nr_class-1)/2;
+			mod
