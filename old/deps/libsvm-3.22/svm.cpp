@@ -3103,4 +3103,93 @@ const char *svm_check_parameter(const svm_problem *prob, const svm_parameter *pa
 	   svm_type == ONE_CLASS ||
 	   svm_type == NU_SVR)
 		if(param->nu <= 0 || param->nu > 1)
-			retur
+			return "nu <= 0 or nu > 1";
+
+	if(svm_type == EPSILON_SVR)
+		if(param->p < 0)
+			return "p < 0";
+
+	if(param->shrinking != 0 &&
+	   param->shrinking != 1)
+		return "shrinking != 0 and shrinking != 1";
+
+	if(param->probability != 0 &&
+	   param->probability != 1)
+		return "probability != 0 and probability != 1";
+
+	if(param->probability == 1 &&
+	   svm_type == ONE_CLASS)
+		return "one-class SVM probability output not supported yet";
+
+
+	// check whether nu-svc is feasible
+
+	if(svm_type == NU_SVC)
+	{
+		int l = prob->l;
+		int max_nr_class = 16;
+		int nr_class = 0;
+		int *label = Malloc(int,max_nr_class);
+		int *count = Malloc(int,max_nr_class);
+
+		int i;
+		for(i=0;i<l;i++)
+		{
+			int this_label = (int)prob->y[i];
+			int j;
+			for(j=0;j<nr_class;j++)
+				if(this_label == label[j])
+				{
+					++count[j];
+					break;
+				}
+			if(j == nr_class)
+			{
+				if(nr_class == max_nr_class)
+				{
+					max_nr_class *= 2;
+					label = (int *)realloc(label,max_nr_class*sizeof(int));
+					count = (int *)realloc(count,max_nr_class*sizeof(int));
+				}
+				label[nr_class] = this_label;
+				count[nr_class] = 1;
+				++nr_class;
+			}
+		}
+
+		for(i=0;i<nr_class;i++)
+		{
+			int n1 = count[i];
+			for(int j=i+1;j<nr_class;j++)
+			{
+				int n2 = count[j];
+				if(param->nu*(n1+n2)/2 > min(n1,n2))
+				{
+					free(label);
+					free(count);
+					return "specified nu is infeasible";
+				}
+			}
+		}
+		free(label);
+		free(count);
+	}
+
+	return NULL;
+}
+
+int svm_check_probability_model(const svm_model *model)
+{
+	return ((model->param.svm_type == C_SVC || model->param.svm_type == NU_SVC) &&
+		model->probA!=NULL && model->probB!=NULL) ||
+		((model->param.svm_type == EPSILON_SVR || model->param.svm_type == NU_SVR) &&
+		 model->probA!=NULL);
+}
+
+void svm_set_print_string_function(void (*print_func)(const char *))
+{
+	if(print_func == NULL)
+		svm_print_string = &print_string_stdout;
+	else
+		svm_print_string = print_func;
+}
