@@ -1,0 +1,16 @@
+Installation
+=======================================
+
+clone repo
+`make` or `julia build.jl` inside of deps folder
+run tests be running test.jl in tests/
+
+uses JLD package
+
+Function description
+=======================================
+grid(num_w, ssh_w, telnet_w, trialfile, options) (tools/grid.jl)
+  -num_w = number of cores per node
+  -ssh_w = list of names of ssh nodes
+  -telnet_w = list of names of telnet nodes (use empty brackets [] to notate no telnet workers - same for ssh)
+  -options are gridregression options, ex/ "-log2c 10,11.1,1 -log2g -2,-0.9,1 -log2p -5,-3.9,1"

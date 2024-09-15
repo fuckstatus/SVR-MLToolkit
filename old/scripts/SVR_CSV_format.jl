@@ -520,3 +520,49 @@ function runSVM(trailfile, testfile, outfolder, modelfile; options="", dense=fal
 
 	ptest = readproblem(testfile)
 	predicted, target, test, timeElapsed2 = predictSVM(ptest, outfile, pmodel, dense=dense)
+
+	resultanalysis(predicted, target, param, outfolder, timeElapsed, timeElapsed2)
+
+end
+
+function runSVM2(trailfile, testfile, outfolder, modelfile; options="", dense=false)
+
+	fileend = trailfile[end-3:end]
+	if fileend == ".csv"
+	pprob, prob = csvreadproblem(trailfile)
+	elseif fileend == ".jld"
+	pprob, prob = jldreadproblem(trailfile)
+	else
+	pprob = readproblem(trailfile)
+	end
+
+	pparam, param = params_from_opts(options)
+
+	modelfile = string(outfolder, "/", modelfile)
+	outfile = setupoutput(outfolder, modelfile)
+
+
+	pmodel, timeElapsed, success = trainSVM(pprob, pparam, modelfile, dense=dense)
+
+	predicted, target, timeElapsed2 = predictSVM2(testfile, outfile, pmodel, dense=dense)
+
+	resultanalysis(predicted, target, param, outfolder, timeElapsed, timeElapsed2)
+
+end
+
+function runSVMCSV(trailfile, testfile, outfolder, modelfile; options="", dense=false)
+
+	pparam, param = params_from_opts(options)
+	pprob = readproblem(trailfile)
+
+	modelfile = string(outfolder, "/", modelfile)
+	outfile = setupoutput(outfolder, modelfile)
+
+
+	pmodel, timeElapsed, success = trainSVM(pprob, pparam, modelfile, dense=dense)
+
+	predicted, target, timeElapsed2 = predictSVM2(testfile, outfile, pmodel, dense=dense)
+
+	resultanalysis(predicted, target, param, outfolder, timeElapsed, timeElapsed2)
+
+end
