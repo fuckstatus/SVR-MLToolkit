@@ -113,4 +113,77 @@ function do_cross_validation(trailfile, nr_fold; options::AbstractString="")
 	do_cross_validation(pprob, pparam, nr_fold)
 end
 
-function do_cross_validation(p
+function do_cross_validation(pprob, pparam, nr_fold)
+	prob = unsafe_load(pprob)
+	param = unsafe_load(pparam)
+	total_correct = 0
+	total_error = sumv = sumy = sumvv = sumyy = sumvy = 0.0
+	target = Array{Float64}(prob.l)
+
+	ccall((:svm_cross_validation, svmlib), Void, (Ptr{svm_problem}, Ptr{svm_parameter}, Cint, Ptr{Float64}), pprob, pparam, nr_fold, pointer(target))
+
+	if param.svm_type == EPSILON_SVR || param.svm_type == NU_SVR
+		for i=1:prob.l
+			y = unsafe_load(prob.y, i)
+			v = target[i]
+			total_error += (v-y)*(v-y)
+			sumv+=v
+			sumy+=y
+			sumvv+v*v
+			sumyy+=y*y
+			sumvy+=v*y
+		end
+		@printf("Cross Validation Mean squared error = %g\n",total_error/prob.l)
+		@printf("Cross Validation Squared correlation coefficient = %g\n",
+			((prob.l*sumvy-sumv*sumy)*(prob.l*sumvy-sumv*sumy))/
+			((prob.l*sumvv-sumv*sumv)*(prob.l*sumyy-sumy*sumy))
+			)
+	else
+		for i=1:prob.l
+			if target[i] == unsafe_load(prob.y, i)
+	total_correct+=1
+	@printf("Cross Validation Accuracy = %g%%\n",100.0*total_correct/prob.l)
+	end
+		end
+	end
+end
+
+function resultanalysis(predicted, target, param, outfolder, timeElapsed, timeElapsed2)
+	error = sum((predicted .- target).*(predicted .- target))
+	sump = sum(predicted)
+	sumt = sum(target)
+	sumpp = sum(predicted .* predicted)
+	sumtt = sum(target .* target)
+	sumpt = sum(predicted .* target)
+	total = size(predicted, 2)
+
+	if param.svm_type==NU_SVR || param.svm_type==EPSILON_SVR
+		sqErr = error/total
+		sqCorr = ((total*sumpt-sump*sumt)*(total*sumpt-sump*sumt))/((total*sumpp-sump*sump)*(total*sumtt-sumt*sumt))
+		println("Mean squared error =", trunc(sqErr, 2), "(regression)")
+		println("Squared correlation coefficient =", trunc(sqCorr, 6), "(regression)")
+	end
+
+	writecsv(joinpath(outfolder, "predicted.csv"), predicted)
+	writecsv(joinpath(outfolder, "target.csv"), target)
+	f = open(joinpath(outfolder, "info"), "a")
+	write(f, string("Mean squared error = ", trunc(sqErr, 2), "(regression)\n",
+		"Squared correlation coefficient = ", trunc(sqCorr, 6), "(regression)\n",
+		"time to train = ", timeElapsed, " seconds\n",
+		"time to predict = ", timeElapsed2, " seconds\n"
+		))
+	close(f)
+	return sqErr, sqCorr
+end
+
+function runSVM(trailfile, testfile, outfolder, modelfile; dense::Bool=false)
+	pparam, param = params_from_opts(options)
+	pprob, prob = csvreadproblem(trailfile)
+
+	pmodel, timeElapsed, success = train(pprob, pparam, dense=dense)
+
+	ptest = readproblem(testfile)
+	predicted, target, test, timeElapsed2 = predict(ptest, pmodel, dense=dense)
+
+	resultanalysis(predicted, target, param, test, outfolder, timeElapsed, timeElapsed2)
+end
