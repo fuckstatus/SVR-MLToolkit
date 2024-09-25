@@ -353,4 +353,175 @@ class TelnetWorker(Worker):
 			
 def find_parameters(dataset_pathname, options=''):
 	
-	def update_param(c,g,p,mse,best_c,best_g,best_p,best_mse,worker,resu
+	def update_param(c,g,p,mse,best_c,best_g,best_p,best_mse,worker,resumed):
+		if ( mse < best_mse ):
+			best_mse,best_c,best_g,best_p = mse,c,g,p
+		stdout_str = '[{0}] {1} {2} (best '.format\
+			(worker,' '.join(str(x) for x in [c,g,p] if x is not None),mse)
+		output_str = ''
+		if c != None:
+			stdout_str += 'c={0}, '.format(2.0**best_c)
+			output_str += 'log2c={0} '.format(c)
+		if g != None:
+			stdout_str += 'g={0}, '.format(2.0**best_g)
+			output_str += 'log2g={0} '.format(g)
+		if p != None:
+			stdout_str += 'p={0}, '.format(2.0**best_p)
+			output_str += 'log2p={0} '.format(p)
+		stdout_str += 'mse={0})'.format(best_mse)
+		print(stdout_str)
+		if options.out_pathname and not resumed:
+			output_str += 'mse={0}\n'.format(mse)
+			result_file.write(output_str)
+			result_file.flush()
+		
+		return best_c,best_g,best_p,best_mse
+		
+	options = GridOption(dataset_pathname, options);
+
+	if options.gnuplot_pathname:
+		gnuplot = Popen(options.gnuplot_pathname,stdin = PIPE,stdout=PIPE,stderr=PIPE).stdin
+	else:
+		gnuplot = None
+		
+	# put jobs in queue
+
+	jobs,resumed_jobs = calculate_jobs(options)
+	job_queue = Queue(0)
+	result_queue = Queue(0)
+
+	for (c,g,p) in resumed_jobs:
+		result_queue.put(('resumed',c,g,p,resumed_jobs[(c,g,p)]))
+
+	for line in jobs:
+		for (c,g,p) in line:
+			if (c,g,p) not in resumed_jobs:
+				job_queue.put((c,g,p))
+
+	# hack the queue to become a stack --
+	# this is important when some thread
+	# failed and re-put a job. It we still
+	# use FIFO, the job will be put
+	# into the end of the queue, and the graph
+	# will only be updated in the end
+ 
+	job_queue._put = job_queue.queue.appendleft
+
+	# fire telnet workers
+
+	if telnet_workers:
+		nr_telnet_worker = len(telnet_workers)
+		username = getpass.getuser()
+		password = getpass.getpass()
+		for host in telnet_workers:
+			worker = TelnetWorker(host,job_queue,result_queue,
+					 host,username,password,options)
+			worker.start()
+
+	# fire ssh workers
+
+	if ssh_workers:
+		for host in ssh_workers:
+			worker = SSHWorker(host,job_queue,result_queue,host,options)
+			worker.start()
+
+	# fire local workers
+
+	for i in range(nr_local_worker):
+		worker = LocalWorker('local',job_queue,result_queue,options)
+		worker.start()
+
+	# gather results
+
+	done_jobs = {}
+
+	if options.out_pathname:
+		if options.resume_pathname:
+			result_file = open(options.out_pathname, 'a')
+		else:
+			result_file = open(options.out_pathname, 'w')
+
+
+	db = []
+	best_mse = float('+inf')
+	best_c,best_g,best_p = None,None,None  
+
+	for (c,g,p) in resumed_jobs:
+		mse = resumed_jobs[(c,g,p)]
+		best_c,best_g,best_p,best_mse = update_param(c,g,p,mse,best_c,best_g,best_p,best_mse,'resumed',True)
+
+	for line in jobs:
+		for (c,g,p) in line:
+			while (c,g,p) not in done_jobs:
+				(worker,c1,g1,p1,mse1) = result_queue.get()
+				done_jobs[(c1,g1,p1)] = mse1
+				if (c1,g1,p1) not in resumed_jobs:
+					best_c,best_g,best_p,best_mse = update_param(c1,g1,p1,mse1,best_c,best_g,best_p,best_mse,worker,False)
+			db.append((c,g,p,done_jobs[(c,g,p)]))
+		if gnuplot and options.grid_with_c and options.grid_with_g:
+			redraw(db,[best_c, best_g, best_rate],gnuplot,options)
+			redraw(db,[best_c, best_g, best_rate],gnuplot,options,True)
+
+
+	if options.out_pathname:
+		result_file.close()
+	job_queue.put((WorkerStopToken,None,None))
+	best_param, best_cgp  = {}, []
+	if best_c != None:
+		best_param['c'] = 2.0**best_c
+		best_cgp += [2.0**best_c]
+	if best_g != None:
+		best_param['g'] = 2.0**best_g
+		best_cgp += [2.0**best_g]
+	if best_p != None:
+		best_param['p'] = 2.0**best_p
+		best_cgp += [2.0**best_p]
+	print('{0} {1}'.format(' '.join(map(str,best_cgp)), best_mse))
+
+	return best_mse, best_param
+
+def set_for_parallel(num_w, ssh_w, telnet_w):
+	global nr_local_worker
+	global ssh_workers
+	global telnet_workers
+	nr_local_worker = num_w
+	ssh_workers = ssh_w
+	telnet_workers = telnet_w
+
+def printw():
+	print(nr_local_worker)
+
+if __name__ == '__main__':
+
+	def exit_with_help():
+		print("""\
+Usage: gridregression.py [grid_options] [svm_options] dataset
+
+grid_options :
+-log2c {begin,end,step | "null"} : set the range of c (default -1,6,1)
+    begin,end,step -- c_range = 2^{begin,...,begin+k*step,...,end}
+    "null"         -- do not grid with c
+-log2g {begin,end,step | "null"} : set the range of g (default 0,-8,-1)
+    begin,end,step -- g_range = 2^{begin,...,begin+k*step,...,end}
+    "null"         -- do not grid with g
+-log2p {begin,end,step | "null"} : set the range of p (default -8, -1, 1)
+    begin,end,step -- p_range = 2^{begin,...,begin+k*step,...,end}
+    "null"         -- do not grid with p
+-v n : n-fold cross validation (default 5)
+-svmtrain pathname : set svm executable path and name
+-out {pathname | "null"} : (default dataset.out)
+    pathname -- set output file path and name
+    "null"   -- do not output file
+-resume [pathname] : resume the grid task using an existing output file (default pathname is dataset.out)
+    This is experimental. Try this option only if some parameters have been checked for the SAME data.
+
+svm_options : additional options for svm-train""")
+		sys.exit(1)
+	
+	if len(sys.argv) < 2:
+		exit_with_help()
+	dataset_pathname = sys.argv[-1]
+	options = sys.argv[1:-1]
+	try:
+		find_parameters(dataset_pathname, options)
+	except 
