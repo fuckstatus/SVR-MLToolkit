@@ -168,4 +168,189 @@ def redraw(db,best_param,gnuplot,options,tofile=False):
 
 def calculate_jobs(options):
 	
-	def range
+	def range_f(begin,end,step):
+		# like range, but works on non-integer too
+		seq = []
+		while True:
+			if step > 0 and begin > end: break
+			if step < 0 and begin < end: break
+			seq.append(begin)
+			begin = begin + step
+		return seq
+	
+	def permute_sequence(seq):
+		n = len(seq)
+		if n <= 1: return seq
+	
+		mid = int(n/2)
+		left = permute_sequence(seq[:mid])
+		right = permute_sequence(seq[mid+1:])
+	
+		ret = [seq[mid]]
+		while left or right:
+			if left: ret.append(left.pop(0))
+			if right: ret.append(right.pop(0))
+			
+		return ret	
+
+	
+	c_seq = permute_sequence(range_f(options.c_begin,options.c_end,options.c_step))
+	g_seq = permute_sequence(range_f(options.g_begin,options.g_end,options.g_step))
+	p_seq = permute_sequence(range_f(options.p_begin,options.p_end,options.p_step))
+	
+	if not options.grid_with_c:
+		c_seq = [None]
+	if not options.grid_with_g:
+		g_seq = [None] 
+	if not options.grid_with_p:
+		p_seq = [None]
+	
+	nr_c = len(c_seq)
+	nr_g = len(g_seq)
+	nr_p = len(p_seq)
+	jobs = []
+
+	for i in range(0,nr_c):
+		for j in range(0,nr_g):
+			for s in range(0,nr_p):
+				line=[]
+				line.append((c_seq[i],g_seq[j],p_seq[s]))
+				jobs.append(line)
+	resumed_jobs = {}
+	
+	if options.resume_pathname is None:
+		return jobs, resumed_jobs
+
+	for line in open(options.resume_pathname, 'r'):
+		line = line.strip()
+		rst = re.findall(r'mse=([0-9.]+)',line)
+		if not rst: 
+			continue
+		mse = float(rst[0])
+
+		c, g, p = None, None, None 
+		rst = re.findall(r'log2c=([0-9.-]+)',line)
+		if rst: 
+			c = float(rst[0])
+		rst = re.findall(r'log2g=([0-9.-]+)',line)
+		if rst: 
+			g = float(rst[0])
+		rst = re.findall(r'log2p=([0-9,-]+)',line)
+		if rst:
+			p = float(rst[0])
+
+		resumed_jobs[(c,g,p)] = mse
+
+	return jobs, resumed_jobs
+
+	
+class WorkerStopToken:  # used to notify the worker to stop or if a worker is dead
+	pass
+
+class Worker(Thread):
+	def __init__(self,name,job_queue,result_queue,options):
+		Thread.__init__(self)
+		self.name = name
+		self.job_queue = job_queue
+		self.result_queue = result_queue
+		self.options = options
+		
+	def run(self):
+		while True:
+			(cexp,gexp,pexp) = self.job_queue.get()
+			if cexp is WorkerStopToken:
+				self.job_queue.put((cexp,gexp,pexp))
+				# print('worker {0} stop.'.format(self.name))
+				break
+			try:
+				c, g, p = None, None, None
+				if cexp != None:
+					c = 2.0**cexp
+				if gexp != None:
+					g = 2.0**gexp
+				if pexp != None:
+					p = 2.0**pexp
+				mse = self.run_one(c,g,p)
+				if mse is None: raise RuntimeError('get no mse')
+			except:
+				# we failed, let others do that and we just quit
+			
+				traceback.print_exception(sys.exc_info()[0], sys.exc_info()[1], sys.exc_info()[2])
+				
+				self.job_queue.put((cexp,gexp,pexp))
+				sys.stderr.write('worker {0} quit.\n'.format(self.name))
+				break
+			else:
+				self.result_queue.put((self.name,cexp,gexp,pexp,mse))
+
+	def get_cmd(self,c,g,p):
+		options=self.options
+		cmdline = 'julia '
+		cmdline += options.svmtrain_pathname
+		cmdline += ' '
+		cmdline += options.dataset_pathname
+		cmdline += ' '
+		cmdline += '{0}'.format(options.fold)
+		cmdline += ' svm_type=EPSILON_SVR'
+		if options.grid_with_c: 
+			cmdline += ',C={0}'.format(c)
+		if options.grid_with_g: 
+			cmdline += ',gamma={0}'.format(g)
+		if options.grid_with_p:
+			cmdline += ',p={0}' .format(p)
+#		print(cmdline)
+		return cmdline
+		
+class LocalWorker(Worker):
+	def run_one(self,c,g,p):
+		cmdline = self.get_cmd(c,g,p)
+		result = Popen(cmdline,shell=True,stdout=PIPE,stderr=PIPE,stdin=PIPE).stdout
+		for line in result.readlines():
+			if str(line).find('Cross') != -1:
+				return float(line.split()[-1])
+
+class SSHWorker(Worker):
+	def __init__(self,name,job_queue,result_queue,host,options):
+		Worker.__init__(self,name,job_queue,result_queue,options)
+		self.host = host
+		self.cwd = os.getcwd()
+	def run_one(self,c,g,p):
+		cmdline = 'ssh -x -t -t {0} "cd {1}; {2}"'.format\
+			(self.host,self.cwd,self.get_cmd(c,g,p))
+		result = Popen(cmdline,shell=True,stdout=PIPE,stderr=PIPE,stdin=PIPE).stdout
+		for line in result.readlines():
+			if str(line).find('Cross') != -1:
+				return float(line.split()[-1])
+
+class TelnetWorker(Worker):
+	def __init__(self,name,job_queue,result_queue,host,username,password,options):
+		Worker.__init__(self,name,job_queue,result_queue,options)
+		self.host = host
+		self.username = username
+		self.password = password		
+	def run(self):
+		import telnetlib
+		self.tn = tn = telnetlib.Telnet(self.host)
+		tn.read_until('login: ')
+		tn.write(self.username + '\n')
+		tn.read_until('Password: ')
+		tn.write(self.password + '\n')
+
+		# XXX: how to know whether login is successful?
+		tn.read_until(self.username)
+		# 
+		print('login ok', self.host)
+		tn.write('cd '+os.getcwd()+'\n')
+		Worker.run(self)
+		tn.write('exit\n')			   
+	def run_one(self,c,g,p):
+		cmdline = self.get_cmd(c,g,p)
+		result = self.tn.write(cmdline+'\n')
+		(idx,matchm,output) = self.tn.expect(['Cross.*\n'])
+		for line in output.split('\n'):
+			if str(line).find('Cross') != -1:
+				return float(line.split()[-1])
+			
+def find_parameters(dataset_pathname, options=''):
+	
+	def update_param(c,g,p,mse,best_c,best_g,best_p,best_mse,worker,resu
