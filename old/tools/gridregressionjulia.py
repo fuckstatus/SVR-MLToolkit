@@ -524,4 +524,7 @@ svm_options : additional options for svm-train""")
 	options = sys.argv[1:-1]
 	try:
 		find_parameters(dataset_pathname, options)
-	except 
+	except (IOError,ValueError) as e:
+		sys.stderr.write(str(e) + '\n')
+		sys.stderr.write('Try "gridregression.py" for more information.\n')
+		sys.exit(1)
